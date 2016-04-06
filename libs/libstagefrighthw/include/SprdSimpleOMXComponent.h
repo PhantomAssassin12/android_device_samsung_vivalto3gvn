@@ -58,6 +58,11 @@ protected:
         } mTransition;
     };
 
+    enum {
+        kStoreMetaDataExtensionIndex = OMX_IndexVendorStartUnused + 1,
+        kPrepareForAdaptivePlaybackIndex,
+    };
+
     void addPort(const OMX_PARAM_PORTDEFINITIONTYPE &def);
 
     virtual OMX_ERRORTYPE internalGetParameter(
@@ -72,7 +77,7 @@ protected:
             OMX_PTR appPrivate,
             OMX_U32 size,
             OMX_U8 *ptr,
-            BufferPrivateStruct* bufferPrivate=NULL);
+            BufferPrivateStruct *bufferPrivate=NULL);
 
     virtual OMX_ERRORTYPE internalUseBuffer(
             OMX_BUFFERHEADERTYPE **buffer,
@@ -80,7 +85,7 @@ protected:
             OMX_PTR appPrivate,
             OMX_U32 size,
             OMX_U8 *ptr,
-            BufferPrivateStruct* bufferPrivate=NULL);
+            BufferPrivateStruct *bufferPrivate=NULL);
 
     virtual OMX_ERRORTYPE allocateBuffer(
             OMX_BUFFERHEADERTYPE **buffer,
@@ -100,10 +105,14 @@ protected:
     virtual void onPortFlushCompleted(OMX_U32 portIndex);
     virtual void onPortEnableCompleted(OMX_U32 portIndex, bool enabled);
     virtual void onPortFlushPrepare(OMX_U32 portIndex);
+    virtual void onReset();
 
     PortInfo *editPortInfo(OMX_U32 portIndex);
+    void setDdrFreq(uint32_t khz);
 
-private:
+    bool mIOMMUEnabled;
+
+/* private: */
     enum {
         kWhatSendCommand,
         kWhatEmptyThisBuffer,
@@ -151,4 +160,3 @@ private:
 }  // namespace android
 
 #endif  // SPRD_SIMPLE_OMX_COMPONENT_H_
-

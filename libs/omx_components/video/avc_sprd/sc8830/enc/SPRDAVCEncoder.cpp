@@ -273,7 +273,6 @@ SPRDAVCEncoder::SPRDAVCEncoder(
       mSawInputEOS(false),
       mSignalledError(false),
       mStoreMetaData(OMX_FALSE),
-      mIOMMUEnabled(false),
       mPbuf_yuv_v(NULL),
       mPbuf_yuv_p(0),
       mPbuf_yuv_size(0),
@@ -958,6 +957,7 @@ OMX_ERRORTYPE SPRDAVCEncoder::internalSetParameter(
             return OMX_ErrorUndefined;
         }
 
+#if 0
         // PV's AVC encoder only supports baseline profile
         if (avcType->eProfile != OMX_VIDEO_AVCProfileBaseline ||
                 avcType->nRefFrames != 1 ||
@@ -974,6 +974,7 @@ OMX_ERRORTYPE SPRDAVCEncoder::internalSetParameter(
                 avcType->nCabacInitIdc != 0) {
             return OMX_ErrorUndefined;
         }
+#endif
 
         if (OK != ConvertOmxAvcLevelToAvcSpecLevel(avcType->eLevel, &mAVCEncLevel)) {
             return OMX_ErrorUndefined;

@@ -18,9 +18,9 @@
 #define LOG_TAG "SprdSimpleOMXComponent"
 #include <utils/Log.h>
 
-#include "include/SprdSimpleOMXComponent.h"
+#include <SprdSimpleOMXComponent.h>
 
-#include "gralloc_priv.h"
+#include <gralloc_priv.h>
 
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/ALooper.h>
@@ -29,10 +29,10 @@
 namespace android {
 
 SprdSimpleOMXComponent::SprdSimpleOMXComponent(
-    const char *name,
-    const OMX_CALLBACKTYPE *callbacks,
-    OMX_PTR appData,
-    OMX_COMPONENTTYPE **component)
+        const char *name,
+        const OMX_CALLBACKTYPE *callbacks,
+        OMX_PTR appData,
+        OMX_COMPONENTTYPE **component)
     : SprdOMXComponent(name, callbacks, appData, component),
       mLooper(new ALooper),
       mHandler(new AHandlerReflector<SprdSimpleOMXComponent>(this)),
@@ -42,9 +42,9 @@ SprdSimpleOMXComponent::SprdSimpleOMXComponent(
     mLooper->registerHandler(mHandler);
 
     mLooper->start(
-        false, // runOnCallingThread
-        false, // canCallJava
-        ANDROID_PRIORITY_FOREGROUND);
+            false, // runOnCallingThread
+            false, // canCallJava
+            ANDROID_PRIORITY_FOREGROUND);
 }
 
 void SprdSimpleOMXComponent::prepareForDestruction() {
@@ -57,7 +57,7 @@ void SprdSimpleOMXComponent::prepareForDestruction() {
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::sendCommand(
-    OMX_COMMANDTYPE cmd, OMX_U32 param, OMX_PTR data) {
+        OMX_COMMANDTYPE cmd, OMX_U32 param, OMX_PTR data) {
     CHECK(data == NULL);
 
     sp<AMessage> msg = new AMessage(kWhatSendCommand, mHandler->id());
@@ -105,13 +105,13 @@ bool SprdSimpleOMXComponent::isSetParameterAllowed(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::getParameter(
-    OMX_INDEXTYPE index, OMX_PTR params) {
+        OMX_INDEXTYPE index, OMX_PTR params) {
     Mutex::Autolock autoLock(mLock);
     return internalGetParameter(index, params);
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::setParameter(
-    OMX_INDEXTYPE index, const OMX_PTR params) {
+        OMX_INDEXTYPE index, const OMX_PTR params) {
     Mutex::Autolock autoLock(mLock);
 
     CHECK(isSetParameterAllowed(index, params));
@@ -120,7 +120,7 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::setParameter(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::internalGetParameter(
-    OMX_INDEXTYPE index, OMX_PTR params) {
+        OMX_INDEXTYPE index, OMX_PTR params) {
     switch (index) {
     case OMX_IndexParamPortDefinition:
     {
@@ -129,17 +129,13 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::internalGetParameter(
 
         if (defParams->nPortIndex >= mPorts.size()
                 || defParams->nSize
-                != sizeof(OMX_PARAM_PORTDEFINITIONTYPE)) {
+                        != sizeof(OMX_PARAM_PORTDEFINITIONTYPE)) {
             return OMX_ErrorUndefined;
         }
 
         const PortInfo *port =
             &mPorts.itemAt(defParams->nPortIndex);
-#if 0
-        if(defParams->nPortIndex == OMX_DirOutput) {
-            ALOGI("internalGetParameter, outport, eColorFormat: 0x%x",port->mDef.format.video.eColorFormat);
-        }
-#endif
+
         memcpy(defParams, &port->mDef, sizeof(port->mDef));
 
         return OMX_ErrorNone;
@@ -151,36 +147,35 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::internalGetParameter(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::internalSetParameter(
-    OMX_INDEXTYPE index, const OMX_PTR params) {
+        OMX_INDEXTYPE index, const OMX_PTR params) {
     switch (index) {
     case OMX_IndexParamPortDefinition:
     {
         OMX_PARAM_PORTDEFINITIONTYPE *defParams =
             (OMX_PARAM_PORTDEFINITIONTYPE *)params;
 
-        if (defParams->nPortIndex >= mPorts.size()
-                || defParams->nSize != sizeof(OMX_PARAM_PORTDEFINITIONTYPE)) {
-            return OMX_ErrorUndefined;
+        if (defParams->nPortIndex >= mPorts.size()) {
+            return OMX_ErrorBadPortIndex;
+        }
+        if (defParams->nSize != sizeof(OMX_PARAM_PORTDEFINITIONTYPE)) {
+            return OMX_ErrorUnsupportedSetting;
         }
 
         PortInfo *port =
             &mPorts.editItemAt(defParams->nPortIndex);
 
-        if (defParams->nBufferSize != port->mDef.nBufferSize) {
-            CHECK_GE(defParams->nBufferSize, port->mDef.nBufferSize);
+        // default behavior is that we only allow buffer size to increase
+        if (defParams->nBufferSize > port->mDef.nBufferSize) {
             port->mDef.nBufferSize = defParams->nBufferSize;
         }
 
-        if (defParams->nBufferCountActual
-                != port->mDef.nBufferCountActual) {
-            CHECK_GE(defParams->nBufferCountActual,
-                     port->mDef.nBufferCountMin);
-
-            port->mDef.nBufferCountActual = defParams->nBufferCountActual;
+        if (defParams->nBufferCountActual < port->mDef.nBufferCountMin) {
+            ALOGW("component requires at least %u buffers (%u requested)",
+                    port->mDef.nBufferCountMin, defParams->nBufferCountActual);
+            return OMX_ErrorUnsupportedSetting;
         }
 
-        memcpy(&port->mDef.format.video, &defParams->format.video, sizeof(OMX_VIDEO_PORTDEFINITIONTYPE));
-
+        port->mDef.nBufferCountActual = defParams->nBufferCountActual;
         return OMX_ErrorNone;
     }
 
@@ -190,31 +185,24 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::internalSetParameter(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::useBuffer(
-    OMX_BUFFERHEADERTYPE **header,
-    OMX_U32 portIndex,
-    OMX_PTR appPrivate,
-    OMX_U32 size,
-    OMX_U8 *ptr,
-    BufferPrivateStruct* bufferPrivate) {
-    Mutex::Autolock autoLock(mLock);
-    CHECK_LT(portIndex, mPorts.size());
-
-    PortInfo *port = &mPorts.editItemAt(portIndex);
-
-    CHECK(mState == OMX_StateLoaded || port->mDef.bEnabled == OMX_FALSE);
-
-    CHECK_LT(port->mBuffers.size(), port->mDef.nBufferCountActual);
-
+        OMX_BUFFERHEADERTYPE **header,
+        OMX_U32 portIndex,
+        OMX_PTR appPrivate,
+        OMX_U32 size,
+        OMX_U8 *ptr,
+        BufferPrivateStruct *bufferPrivate) {
     return internalUseBuffer(header, portIndex, appPrivate, size, ptr, bufferPrivate);
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::internalUseBuffer(
-    OMX_BUFFERHEADERTYPE **header,
-    OMX_U32 portIndex,
-    OMX_PTR appPrivate,
-    OMX_U32 size,
-    OMX_U8 *ptr,
-    BufferPrivateStruct* bufferPrivate) {
+        OMX_BUFFERHEADERTYPE **header,
+        OMX_U32 portIndex,
+        OMX_PTR appPrivate,
+        OMX_U32 size,
+        OMX_U8 *ptr,
+        BufferPrivateStruct *bufferPrivate) {
+    Mutex::Autolock autoLock(mLock);
+    CHECK_LT(portIndex, mPorts.size());
 
     *header = new OMX_BUFFERHEADERTYPE;
     (*header)->nSize = sizeof(OMX_BUFFERHEADERTYPE);
@@ -240,11 +228,16 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::internalUseBuffer(
 
     PortInfo *port = &mPorts.editItemAt(portIndex);
 
+    CHECK(mState == OMX_StateLoaded || port->mDef.bEnabled == OMX_FALSE);
+
+    CHECK_LT(port->mBuffers.size(), port->mDef.nBufferCountActual);
+
     port->mBuffers.push();
 
     BufferInfo *buffer =
         &port->mBuffers.editItemAt(port->mBuffers.size() - 1);
-    ALOGI("internalUseBuffer, header=%p, pBuffer=%p, size=%d",*header, ptr, size);
+
+    ALOGI("internalUseBuffer, header=%p, pBuffer=%p, size=%d", *header, ptr, size);
     buffer->mHeader = *header;
     buffer->mOwnedByUs = false;
 
@@ -257,10 +250,10 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::internalUseBuffer(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::allocateBuffer(
-    OMX_BUFFERHEADERTYPE **header,
-    OMX_U32 portIndex,
-    OMX_PTR appPrivate,
-    OMX_U32 size) {
+        OMX_BUFFERHEADERTYPE **header,
+        OMX_U32 portIndex,
+        OMX_PTR appPrivate,
+        OMX_U32 size) {
     OMX_U8* ptr;
     OMX_ERRORTYPE err;
     if(portIndex == OMX_DirOutput) {
@@ -289,8 +282,8 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::allocateBuffer(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::freeBuffer(
-    OMX_U32 portIndex,
-    OMX_BUFFERHEADERTYPE *header) {
+        OMX_U32 portIndex,
+        OMX_BUFFERHEADERTYPE *header) {
     Mutex::Autolock autoLock(mLock);
 
     CHECK_LT(portIndex, mPorts.size());
@@ -355,7 +348,7 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::freeBuffer(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::emptyThisBuffer(
-    OMX_BUFFERHEADERTYPE *buffer) {
+        OMX_BUFFERHEADERTYPE *buffer) {
     sp<AMessage> msg = new AMessage(kWhatEmptyThisBuffer, mHandler->id());
     msg->setPointer("header", buffer);
     msg->post();
@@ -364,7 +357,7 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::emptyThisBuffer(
 }
 
 OMX_ERRORTYPE SprdSimpleOMXComponent::fillThisBuffer(
-    OMX_BUFFERHEADERTYPE *buffer) {
+        OMX_BUFFERHEADERTYPE *buffer) {
     sp<AMessage> msg = new AMessage(kWhatFillThisBuffer, mHandler->id());
     msg->setPointer("header", buffer);
     msg->post();
@@ -382,10 +375,12 @@ OMX_ERRORTYPE SprdSimpleOMXComponent::getState(OMX_STATETYPE *state) {
 
 void SprdSimpleOMXComponent::onMessageReceived(const sp<AMessage> &msg) {
     Mutex::Autolock autoLock(mLock);
-
-    switch (msg->what()) {
+    uint32_t msgType = msg->what();
+    ALOGV("msgType = %d", msgType);
+    switch (msgType) {
     case kWhatSendCommand:
     {
+        ALOGV("kWhatSendCommand");
         int32_t cmd, param;
         CHECK(msg->findInt32("cmd", &cmd));
         CHECK(msg->findInt32("param", &param));
@@ -395,37 +390,6 @@ void SprdSimpleOMXComponent::onMessageReceived(const sp<AMessage> &msg) {
     }
 
     case kWhatEmptyThisBuffer:
-    {
-        OMX_BUFFERHEADERTYPE *header;
-        CHECK(msg->findPointer("header", (void **)&header));
-
-        CHECK(mState == OMX_StateExecuting && mTargetState == mState);
-
-        PortInfo *port = editPortInfo(OMX_DirInput);
-
-        bool found = false;
-
-        for (size_t j = 0; j < port->mBuffers.size(); ++j) {
-            BufferInfo *buffer = &port->mBuffers.editItemAt(j);
-
-            if (buffer->mHeader == header) {
-                CHECK(!buffer->mOwnedByUs);
-
-                buffer->mOwnedByUs = true;
-
-                port->mQueue.push_back(buffer);
-
-                onQueueFilled(OMX_DirInput);
-
-                found = true;
-                break;
-            }
-        }
-
-        CHECK(found);
-        break;
-    }
-
     case kWhatFillThisBuffer:
     {
         OMX_BUFFERHEADERTYPE *header;
@@ -433,9 +397,11 @@ void SprdSimpleOMXComponent::onMessageReceived(const sp<AMessage> &msg) {
 
         CHECK(mState == OMX_StateExecuting && mTargetState == mState);
 
-        PortInfo *port = editPortInfo(OMX_DirOutput);
-
         bool found = false;
+        size_t portIndex = (kWhatEmptyThisBuffer == msgType)
+                ? header->nInputPortIndex
+                : header->nOutputPortIndex;
+        PortInfo *port = editPortInfo(portIndex);
 
         for (size_t j = 0; j < port->mBuffers.size(); ++j) {
             BufferInfo *buffer = &port->mBuffers.editItemAt(j);
@@ -445,15 +411,20 @@ void SprdSimpleOMXComponent::onMessageReceived(const sp<AMessage> &msg) {
 
                 buffer->mOwnedByUs = true;
 
-                BufferCtrlStruct *pBufCtrl = (BufferCtrlStruct *)(header->pOutputPortPrivate);
-                if(pBufCtrl != NULL && pBufCtrl->iRefCount > 0) {
-                    pBufCtrl->iRefCount--;
+                if (msgType == kWhatFillThisBuffer) {
+                    BufferCtrlStruct *pBufCtrl = (BufferCtrlStruct *)(header->pOutputPortPrivate);
+                    if (pBufCtrl != NULL && pBufCtrl->iRefCount > 0)
+                        --pBufCtrl->iRefCount;
+                    if (pBufCtrl != NULL)
+                        ALOGI("fillThisBuffer, buffer: 0x%x, header: 0x%x, iRefCount: %d", buffer, header, pBufCtrl->iRefCount);
                 }
-                if(pBufCtrl != NULL)
-                    ALOGI("fillThisBuffer, buffer: 0x%x, header: 0x%x, iRefCount: %d",buffer, header,pBufCtrl->iRefCount);
-                port->mQueue.push_back(buffer);
 
-                onQueueFilled(OMX_DirOutput);
+                CHECK((msgType == kWhatEmptyThisBuffer
+                        && port->mDef.eDir == OMX_DirInput)
+                        || (port->mDef.eDir == OMX_DirOutput));
+
+                port->mQueue.push_back(buffer);
+                onQueueFilled(portIndex);
 
                 found = true;
                 break;
@@ -536,6 +507,10 @@ void SprdSimpleOMXComponent::onChangeState(OMX_STATETYPE state) {
     checkTransitions();
 }
 
+void SprdSimpleOMXComponent::onReset() {
+    // no-op
+}
+
 void SprdSimpleOMXComponent::onPortEnable(OMX_U32 portIndex, bool enable) {
     CHECK_LT(portIndex, mPorts.size());
 
@@ -575,7 +550,7 @@ void SprdSimpleOMXComponent::onPortEnable(OMX_U32 portIndex, bool enable) {
 }
 
 void SprdSimpleOMXComponent::onPortFlush(
-    OMX_U32 portIndex, bool sendFlushComplete) {
+        OMX_U32 portIndex, bool sendFlushComplete) {
     if (portIndex == OMX_ALL) {
         for (size_t i = 0; i < mPorts.size(); ++i) {
             onPortFlush(i, sendFlushComplete);
@@ -678,6 +653,10 @@ void SprdSimpleOMXComponent::checkTransitions() {
         if (transitionComplete) {
             mState = mTargetState;
 
+            if (mState == OMX_StateLoaded) {
+                onReset();
+            }
+
             notify(OMX_EventCmdComplete, OMX_CommandStateSet, mState, NULL);
         }
     }
@@ -724,7 +703,7 @@ void SprdSimpleOMXComponent::onPortFlushCompleted(OMX_U32 portIndex) {
 }
 
 void SprdSimpleOMXComponent::onPortEnableCompleted(
-    OMX_U32 portIndex, bool enabled) {
+        OMX_U32 portIndex, bool enabled) {
 }
 
 void SprdSimpleOMXComponent::onPortFlushPrepare(OMX_U32 portIndex) {
@@ -737,11 +716,23 @@ SprdSimpleOMXComponent::getPortQueue(OMX_U32 portIndex) {
 }
 
 SprdSimpleOMXComponent::PortInfo *SprdSimpleOMXComponent::editPortInfo(
-    OMX_U32 portIndex) {
+        OMX_U32 portIndex) {
     CHECK_LT(portIndex, mPorts.size());
     return &mPorts.editItemAt(portIndex);
 }
 
-
+void SprdSimpleOMXComponent::setDdrFreq(uint32_t khz)
+{
+    // TODO move devNode def to header
+    const char *const devNode = "/sys/devices/platform/scxx30-dmcfreq.0/devfreq/scxx30-dmcfreq.0/ondemand/set_freq";
+    FILE *fp;
+    if ((fp = fopen(devNode, "w"))) {
+        fprintf(fp, "%u", khz);
+        ALOGI("Set ddr freq to %ukhz", khz);
+        fclose(fp);
+    } else {
+        ALOGE("Failed to open %s", devNode);
+    }
+}
 
 }  // namespace android

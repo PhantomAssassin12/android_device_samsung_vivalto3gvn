@@ -18,8 +18,8 @@
 #define LOG_TAG "SprdOMXPlugin"
 #include <utils/Log.h>
 
-#include "SprdOMXPlugin.h"
-#include "SprdOMXComponent.h"
+#include <SprdOMXPlugin.h>
+#include <SprdOMXComponent.h>
 
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AString.h>
@@ -34,7 +34,6 @@ static const struct {
     const char *mRole;
 
 } kComponents[] = {
-
     { "OMX.sprd.h263.decoder", "sprd_mpeg4dec", "video_decoder.h263" },
     { "OMX.sprd.mpeg4.decoder", "sprd_mpeg4dec", "video_decoder.mpeg4" },
     { "OMX.sprd.h264.decoder", "sprd_h264dec", "video_decoder.h264" },
@@ -68,6 +67,7 @@ OMX_ERRORTYPE SprdOMXPlugin::makeComponentInstance(
         OMX_COMPONENTTYPE **component) {
     ALOGI("makeComponentInstance '%s'", name);
 
+    dlerror(); // clear any existing error
     for (size_t i = 0; i < kNumComponents; ++i) {
         if (strcmp(name, kComponents[i].mName)) {
             continue;
@@ -80,10 +80,12 @@ OMX_ERRORTYPE SprdOMXPlugin::makeComponentInstance(
         void *libHandle = dlopen(libName.c_str(), RTLD_NOW);
 
         if (libHandle == NULL) {
-            ALOGE("unable to dlopen %s, dlerror %s", libName.c_str(), dlerror());
+            ALOGE("unable to dlopen %s: %s", libName.c_str(), dlerror());
 
             return OMX_ErrorComponentNotFound;
         }
+
+        ALOGV("load component %s for %s", libName.c_str(), name);
 
         typedef SprdOMXComponent *(*CreateSprdOMXComponentFunc)(
                 const char *, const OMX_CALLBACKTYPE *,
@@ -95,7 +97,8 @@ OMX_ERRORTYPE SprdOMXPlugin::makeComponentInstance(
                     "_Z22createSprdOMXComponentPKcPK16OMX_CALLBACKTYPE"
                     "PvPP17OMX_COMPONENTTYPE");
 
-        if (createSprdOMXComponent == NULL) {
+        if (const char *error = dlerror()) {
+            ALOGE("unable to dlsym %s: %s", libName.c_str(), error);
             dlclose(libHandle);
             libHandle = NULL;
 

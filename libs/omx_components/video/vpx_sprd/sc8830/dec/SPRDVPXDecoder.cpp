@@ -14,29 +14,29 @@
  * limitations under the License.
  */
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 #define LOG_TAG "SPRDVPXDecoder"
-#include <utils/Log.h>
 
-#include "SPRDVPXDecoder.h"
-
+#include <media/hardware/HardwareAPI.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/IOMX.h>
-#include <media/hardware/HardwareAPI.h>
+
 #include <ui/GraphicBufferMapper.h>
+#include <utils/Log.h>
 
-#include "gralloc_priv.h"
-#include "vpx_dec_api.h"
 #include <dlfcn.h>
-#include "ion_sprd.h"
 
-//#define VIDEODEC_CURRENT_OPT  /*only open for SAMSUNG currently*/
+#include <gralloc_priv.h>
+#include <ion_sprd.h>
 
+#include "vpx_dec_api.h"
+#include "SPRDVPXDecoder.h"
 
 namespace android {
 
+#if 0
 template<class T>
 static void InitOMXParams(T *params) {
     params->nSize = sizeof(T);
@@ -45,22 +45,26 @@ static void InitOMXParams(T *params) {
     params->nVersion.s.nRevision = 0;
     params->nVersion.s.nStep = 0;
 }
+#endif
 
 SPRDVPXDecoder::SPRDVPXDecoder(
     const char *name,
     const OMX_CALLBACKTYPE *callbacks,
     OMX_PTR appData,
     OMX_COMPONENTTYPE **component)
-    : SprdSimpleOMXComponent(name, callbacks, appData, component),
+    : SprdVideoDecoderOMXComponent(
+            name, "video_decoder.vp8", OMX_VIDEO_CodingVP8,
+            NULL /* profileLevels */, 0 /* numProfileLevels */,
+            320 /* width */, 240 /* height */, callbacks, appData, component),
       mHandle(new tagVPXHandle),
       mInputBufferCount(0),
+#if 0
       mWidth(320),
       mHeight(240),
+#endif
       mMaxWidth(352),
       mMaxHeight(288),
-      mOutputPortSettingsChange(NONE),
       mSignalledError(false),
-      mIOMMUEnabled(false),
       mPbuf_inter(NULL),
       mPbuf_extra_v(NULL),
       mPbuf_extra_p(0),
@@ -80,7 +84,18 @@ SPRDVPXDecoder::SPRDVPXDecoder(
 
     ALOGI("Construct SPRDVPXDecoder, this: %0x", (void *)this);
 
+#if 0
     initPorts();
+#else
+    const size_t kMinCompressionRatio = 2;
+    const size_t kMaxOutputBufferSize = kNumBuffers;
+    initPorts(
+            kNumBuffers /* numInputBuffers */,
+            kMaxOutputBufferSize / kMinCompressionRatio  /* inputBufferSize */,
+            kNumBuffers /* numOutputBuffers */,
+            MEDIA_MIMETYPE_VIDEO_VP8,
+            kMinCompressionRatio);
+#endif
     CHECK_EQ(openDecoder("libomx_vpxdec_hw_sprd.so"), true);
 
     mIOMMUEnabled = MemoryHeapIon::Mm_iommu_is_enabled();
@@ -132,11 +147,12 @@ SPRDVPXDecoder::~SPRDVPXDecoder() {
     }
     while (mSetFreqCount > 0)
     {
-        set_ddr_freq("0");
+        setDdrFreq(0);
         mSetFreqCount--;
     }
 }
 
+#if 0
 void SPRDVPXDecoder::initPorts() {
     OMX_PARAM_PORTDEFINITIONTYPE def;
     InitOMXParams(&def);
@@ -197,53 +213,22 @@ void SPRDVPXDecoder::initPorts() {
 
     ALOGI("%s, %d, def.nBufferCountMin: %d,def.nBufferCountActual : %d ", __FUNCTION__, __LINE__, def.nBufferCountMin, def.nBufferCountActual );
 }
-
-void SPRDVPXDecoder::set_ddr_freq(const char* freq_in_khz)
-{
-    const char* const set_freq = "/sys/devices/platform/scxx30-dmcfreq.0/devfreq/scxx30-dmcfreq.0/ondemand/set_freq";
-    FILE* fp = fopen(set_freq, "w");
-    if (fp != NULL)
-    {
-        fprintf(fp, "%s", freq_in_khz);
-        ALOGE("set ddr freq to %skhz", freq_in_khz);
-        fclose(fp);
-    }
-    else
-    {
-        ALOGE("Failed to open %s", set_freq);
-    }
-}
-
-void SPRDVPXDecoder::change_ddr_freq()
-{
-    uint32_t frame_size = mWidth * mHeight;
-    char* ddr_freq;
-
-    if(frame_size > 1280*720)
-    {
-        ddr_freq = "500000";
-    }
-#ifdef VIDEODEC_CURRENT_OPT
-    else if(frame_size > 864*480)
-    {
-        ddr_freq = "300000";
-    }
-#else
-    else if(frame_size > 720*576)
-    {
-        ddr_freq = "400000";
-    }
-    else if(frame_size > 320*240)
-    {
-        ddr_freq = "300000";
-    }
 #endif
-    else
-    {
-        ddr_freq = "200000";
+
+void SPRDVPXDecoder::changeDdrFreq()
+{
+    if (!mDecoderSwFlag) {
+        uint32_t frameSize = mWidth * mHeight;
+        uint32_t ddrFreq = 200000;
+        if(frameSize > 1280 * 720)
+            ddrFreq = 500000;
+        else if(frameSize > 720 * 576)
+            ddrFreq = 400000;
+        else if(frameSize > 320 * 240)
+            ddrFreq = 300000;
+        setDdrFreq(ddrFreq);
+        ++mSetFreqCount;
     }
-    set_ddr_freq(ddr_freq);
-    mSetFreqCount ++;
 }
 
 status_t SPRDVPXDecoder::initDecoder() {
@@ -333,6 +318,7 @@ status_t SPRDVPXDecoder::initDecoder() {
     return OMX_ErrorNone;
 }
 
+#if 0
 OMX_ERRORTYPE SPRDVPXDecoder::internalGetParameter(
     OMX_INDEXTYPE index, OMX_PTR params) {
     switch (index) {
@@ -392,10 +378,12 @@ OMX_ERRORTYPE SPRDVPXDecoder::internalGetParameter(
         return SprdSimpleOMXComponent::internalGetParameter(index, params);
     }
 }
+#endif
 
 OMX_ERRORTYPE SPRDVPXDecoder::internalSetParameter(
     OMX_INDEXTYPE index, const OMX_PTR params) {
     switch (index) {
+#if 0
     case OMX_IndexParamStandardComponentRole:
     {
         const OMX_PARAM_COMPONENTROLETYPE *roleParams =
@@ -443,7 +431,7 @@ OMX_ERRORTYPE SPRDVPXDecoder::internalSetParameter(
         }
         return OMX_ErrorNone;
     }
-
+#endif
     case OMX_IndexParamPortDefinition:
     {
         OMX_PARAM_PORTDEFINITIONTYPE *defParams =
@@ -471,13 +459,13 @@ OMX_ERRORTYPE SPRDVPXDecoder::internalSetParameter(
         }
 
         memcpy(&port->mDef.format.video, &defParams->format.video, sizeof(OMX_VIDEO_PORTDEFINITIONTYPE));
-        if(defParams->nPortIndex == 1) {
+        if(defParams->nPortIndex == kOutputPortIndex) {
             port->mDef.format.video.nStride = port->mDef.format.video.nFrameWidth;
             port->mDef.format.video.nSliceHeight = port->mDef.format.video.nFrameHeight;
             mWidth = port->mDef.format.video.nFrameWidth;
             mHeight = port->mDef.format.video.nFrameHeight;
             port->mDef.nBufferSize =(((mWidth + 15) & -16)* ((mHeight + 15) & -16) * 3) / 2;
-            change_ddr_freq();
+            changeDdrFreq();
         }
 
         if (!((mWidth < 1280 && mHeight < 720) || (mWidth < 720 && mHeight < 1280))) {
@@ -488,9 +476,8 @@ OMX_ERRORTYPE SPRDVPXDecoder::internalSetParameter(
 
         return OMX_ErrorNone;
     }
-
     default:
-        return SprdSimpleOMXComponent::internalSetParameter(index, params);
+        return SprdVideoDecoderOMXComponent::internalSetParameter(index, params);
     }
 }
 
@@ -833,9 +820,13 @@ void SPRDVPXDecoder::onQueueFilled(OMX_U32 portIndex) {
                 ALOGI("%s, %d, mWidth: %d, mHeight: %d, buf_width: %d, buf_height: %d", __FUNCTION__, __LINE__, mWidth, mHeight, buf_width, buf_height);
                 mWidth = buf_width;
                 mHeight = buf_height;
-                change_ddr_freq();
+                mCropWidth = mWidth;
+                mCropHeight = mHeight;
+                mCropTop = 0;
+                mCropLeft = 0;
+                changeDdrFreq();
 
-                updatePortDefinitions();
+                updatePortDefinitions(true, true);
 
                 (*mVPXDecReleaseRefBuffers)(mHandle);
 
@@ -956,6 +947,7 @@ void SPRDVPXDecoder::onPortFlushCompleted(OMX_U32 portIndex) {
     }
 }
 
+#if 0
 void SPRDVPXDecoder::onPortEnableCompleted(OMX_U32 portIndex, bool enabled) {
     if (portIndex != 1) {
         return;
@@ -981,6 +973,7 @@ void SPRDVPXDecoder::onPortEnableCompleted(OMX_U32 portIndex, bool enabled) {
     }
     }
 }
+#endif
 
 void SPRDVPXDecoder::onPortFlushPrepare(OMX_U32 portIndex) {
     if(portIndex == OMX_DirOutput) {
@@ -989,6 +982,7 @@ void SPRDVPXDecoder::onPortFlushPrepare(OMX_U32 portIndex) {
     }
 }
 
+#if 0
 void SPRDVPXDecoder::updatePortDefinitions() {
     OMX_PARAM_PORTDEFINITIONTYPE *def = &editPortInfo(0)->mDef;
     def->format.video.nFrameWidth = mWidth;
@@ -1008,7 +1002,9 @@ void SPRDVPXDecoder::updatePortDefinitions() {
 
     ALOGI("%s, %d, def.nBufferCountMin: %d,def.nBufferCountActual : %d ", __FUNCTION__, __LINE__, def->nBufferCountMin, def->nBufferCountActual );
 }
+#endif
 
+#if 0
 OMX_ERRORTYPE SPRDVPXDecoder::getExtensionIndex(
     const char *name, OMX_INDEXTYPE *index) {
 
@@ -1029,6 +1025,7 @@ OMX_ERRORTYPE SPRDVPXDecoder::getExtensionIndex(
 
     return OMX_ErrorNotImplemented;
 }
+#endif
 
 // static
 int32_t SPRDVPXDecoder::BindFrameWrapper(

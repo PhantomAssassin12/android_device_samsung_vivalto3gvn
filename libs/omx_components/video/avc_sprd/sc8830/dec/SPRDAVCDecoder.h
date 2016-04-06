@@ -17,9 +17,11 @@
 #ifndef SPRD_AVC_DECODER_H_
 #define SPRD_AVC_DECODER_H_
 
-#include "SprdSimpleOMXComponent.h"
 #include <utils/KeyedVector.h>
 #include <binder/MemoryHeapIon.SPRD.h>
+
+#include <SprdVideoDecoderOMXComponent.h>
+
 #include "avc_dec_api.h"
 
 #define SPRD_ION_DEV "/dev/ion"
@@ -31,7 +33,7 @@ struct tagAVCHandle;
 
 namespace android {
 
-struct SPRDAVCDecoder : public SprdSimpleOMXComponent {
+struct SPRDAVCDecoder : public SprdVideoDecoderOMXComponent {
     SPRDAVCDecoder(const char *name,
                    const OMX_CALLBACKTYPE *callbacks,
                    OMX_PTR appData,
@@ -39,9 +41,6 @@ struct SPRDAVCDecoder : public SprdSimpleOMXComponent {
 
 protected:
     virtual ~SPRDAVCDecoder();
-
-    virtual OMX_ERRORTYPE internalGetParameter(
-        OMX_INDEXTYPE index, OMX_PTR params);
 
     virtual OMX_ERRORTYPE internalSetParameter(
         OMX_INDEXTYPE index, const OMX_PTR params);
@@ -64,18 +63,12 @@ protected:
         OMX_U32 portIndex,
         OMX_BUFFERHEADERTYPE *header);
 
-    virtual OMX_ERRORTYPE getConfig(OMX_INDEXTYPE index, OMX_PTR params);
-
     virtual void onQueueFilled(OMX_U32 portIndex);
     virtual void onPortFlushCompleted(OMX_U32 portIndex);
-    virtual void onPortEnableCompleted(OMX_U32 portIndex, bool enabled);
     virtual void onPortFlushPrepare(OMX_U32 portIndex);
-    virtual OMX_ERRORTYPE getExtensionIndex(const char *name, OMX_INDEXTYPE *index);
 
 private:
     enum {
-        kInputPortIndex   = 0,
-        kOutputPortIndex  = 1,
         kNumInputBuffers  = 8,
         kNumOutputBuffers = 5,
     };
@@ -90,7 +83,6 @@ private:
 
     size_t mInputBufferCount;
 
-    bool mIOMMUEnabled;
     uint8_t *mCodecInterBuffer;
     uint8_t *mCodecExtraBuffer;
 
@@ -104,14 +96,10 @@ private:
     int32  mPbuf_extra_p;
     int32  mPbuf_extra_size;
 
-    uint32_t mWidth, mHeight, mPictureSize;
-    uint32_t mCropLeft, mCropTop;
-    uint32_t mCropWidth, mCropHeight;
+    uint32_t mPictureSize;
 
     int32 mMaxWidth, mMaxHeight;
     int mSetFreqCount;
-
-    OMX_BOOL iUseAndroidNativeBuffer[2];
 
     void* mLibHandle;
     bool mDecoderSwFlag;
@@ -138,19 +126,9 @@ private:
     EOSStatus mEOSStatus;
     bool mNeedIVOP;
 
-    enum OutputPortSettingChange {
-        NONE,
-        AWAITING_DISABLED,
-        AWAITING_ENABLED
-    };
-    OutputPortSettingChange mOutputPortSettingsChange;
-
     bool mSignalledError;
-
-    void initPorts();
     status_t initDecoder();
     void releaseDecoder();
-    void updatePortDefinitions();
     bool drainAllOutputBuffers();
     void drainOneOutputBuffer(int32_t picId, void* pBufferHeader);
     bool handleCropRectEvent(const CropParams* crop);
@@ -164,8 +142,7 @@ private:
     int VSP_bind_cb(void *pHeader);
     int VSP_unbind_cb(void *pHeader);
     bool openDecoder(const char* libName);
-    void set_ddr_freq(const char* freq_in_khz);
-    void change_ddr_freq();
+    void changeDdrFreq();
 
     DISALLOW_EVIL_CONSTRUCTORS(SPRDAVCDecoder);
 };

@@ -283,7 +283,7 @@ OMX_ERRORTYPE SprdOMXComponent::setConfig(
 
 OMX_ERRORTYPE SprdOMXComponent::getExtensionIndex(
         const char *name, OMX_INDEXTYPE *index) {
-    return OMX_ErrorUndefined;
+    return OMX_ErrorUnsupportedIndex;
 }
 
 OMX_ERRORTYPE SprdOMXComponent::useBuffer(
@@ -292,7 +292,7 @@ OMX_ERRORTYPE SprdOMXComponent::useBuffer(
         OMX_PTR appPrivate,
         OMX_U32 size,
         OMX_U8 *ptr,
-        BufferPrivateStruct* bufferPrivate) {
+        BufferPrivateStruct *bufferPrivate) {
     return OMX_ErrorUndefined;
 }
 

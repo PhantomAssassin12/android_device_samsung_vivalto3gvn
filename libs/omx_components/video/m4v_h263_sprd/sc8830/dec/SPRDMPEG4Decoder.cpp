@@ -18,31 +18,23 @@
 #define LOG_TAG "SPRDMPEG4Decoder"
 #include <utils/Log.h>
 
-#include "SPRDMPEG4Decoder.h"
-
+#include <media/hardware/HardwareAPI.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/IOMX.h>
-#include <media/hardware/HardwareAPI.h>
+
 #include <ui/GraphicBufferMapper.h>
+#include <utils/Log.h>
 
-#include "gralloc_priv.h"
-#include "m4v_h263_dec_api.h"
 #include <dlfcn.h>
-#include "ion_sprd.h"
 
-//#define VIDEODEC_CURRENT_OPT  /*only open for SAMSUNG currently*/
+#include <gralloc_priv.h>
+#include <ion_sprd.h>
 
+#include "SPRDMPEG4Decoder.h"
 
 namespace android {
-
-typedef enum {
-    H263_MODE = 0,MPEG4_MODE,
-    FLV_MODE,
-    UNKNOWN_MODE
-} MP4DecodingMode;
-
 
 static const CodecProfileLevel kM4VProfileLevels[] = {
     { OMX_VIDEO_MPEG4ProfileSimple, OMX_VIDEO_MPEG4Level0 },
@@ -72,15 +64,6 @@ static const CodecProfileLevel kH263ProfileLevels[] = {
     { OMX_VIDEO_H263ProfileISWV2,    OMX_VIDEO_H263Level45 },
 };
 
-template<class T>
-static void InitOMXParams(T *params) {
-    params->nSize = sizeof(T);
-    params->nVersion.s.nVersionMajor = 1;
-    params->nVersion.s.nVersionMinor = 0;
-    params->nVersion.s.nRevision = 0;
-    params->nVersion.s.nStep = 0;
-}
-
 void dump_bs( uint8 * pBuffer,uint32 aInBufSize) {
     FILE *fp = fopen("/data/video_es.m4v","ab");
     fwrite(pBuffer,1,aInBufSize,fp);
@@ -98,16 +81,11 @@ SPRDMPEG4Decoder::SPRDMPEG4Decoder(
     const OMX_CALLBACKTYPE *callbacks,
     OMX_PTR appData,
     OMX_COMPONENTTYPE **component)
-    : SprdSimpleOMXComponent(name, callbacks, appData, component),
-      mMode(MODE_MPEG4),
+    : SprdVideoDecoderOMXComponent(name, NULL /* componentRole */, OMX_VIDEO_CodingUnused,
+            NULL /* profileLevels */, 0 /* numProfileLevels */,
+            352 /* width */, 288 /* height */, callbacks, appData, component),
       mHandle(new tagMP4Handle),
       mInputBufferCount(0),
-      mWidth(352),
-      mHeight(288),
-      mCropLeft(0),
-      mCropTop(0),
-      mCropRight(mWidth - 1),
-      mCropBottom(mHeight - 1),
       mMaxWidth(352),
       mMaxHeight(288),
       mSetFreqCount(0),
@@ -115,8 +93,6 @@ SPRDMPEG4Decoder::SPRDMPEG4Decoder(
       mInitialized(false),
       mFramesConfigured(false),
       mNumSamplesOutput(0),
-      mOutputPortSettingsChange(NONE),
-      mIOMMUEnabled(false),
       mCodecInterBuffer(NULL),
       mCodecExtraBuffer(NULL),
       mPbuf_extra_v(NULL),
@@ -144,11 +120,18 @@ SPRDMPEG4Decoder::SPRDMPEG4Decoder(
 
     ALOGI("Construct SPRDMPEG4Decoder, this: %0x", (void *)this);
 
-    if (!strcmp(name, "OMX.sprd.h263.decoder")) {
-        mMode = MODE_H263;
+    if (!strcmp(name, "OMX.sprd.mpeg4.decoder")) {
+        mCodingType = OMX_VIDEO_CodingMPEG4;
+        mProfileLevels = kM4VProfileLevels;
+        mComponentRole = "video_decoder.mpeg4";
     } else {
-        CHECK(!strcmp(name, "OMX.sprd.mpeg4.decoder"));
+        CHECK(!strcmp(name, "OMX.sprd.h263.decoder"));
+        mCodingType = OMX_VIDEO_CodingH263;
+        mProfileLevels = kH263ProfileLevels;
+        mComponentRole = "video_decoder.h263";
     }
+    CHECK(mCodingType != OMX_VIDEO_CodingUnused);
+    mNumProfileLevels = ARRAY_SIZE(mProfileLevels);
 
     bool ret = false;
     ret = openDecoder("libomx_m4vh263dec_sw_sprd.so");
@@ -159,8 +142,8 @@ SPRDMPEG4Decoder::SPRDMPEG4Decoder(
 
     CHECK_EQ(ret, true);
 
-    mIOMMUEnabled = MemoryHeapIon::Mm_iommu_is_enabled();
-    ALOGI("%s, is IOMMU enabled: %d", __FUNCTION__, mIOMMUEnabled);
+    ALOGI("%s, is IOMMU enabled: %d", __FUNCTION__,
+            (mIOMMUEnabled = MemoryHeapIon::Mm_iommu_is_enabled()));
 
     if(mDecoderSwFlag) {
         CHECK_EQ(initDecoder(), (status_t)OK);
@@ -173,7 +156,14 @@ SPRDMPEG4Decoder::SPRDMPEG4Decoder(
         }
     }
 
-    initPorts();
+    const size_t kMinCompressionRatio = 1;
+    const size_t kMaxOutputBufferSize = (mWidth * mHeight * 3) / 2;
+    const char *mimeType = mCodingType == OMX_VIDEO_CodingMPEG4
+            ? MEDIA_MIMETYPE_VIDEO_MPEG4
+            : MEDIA_MIMETYPE_VIDEO_H263;
+    initPorts(kNumInputBuffers, (kMaxOutputBufferSize / kMinCompressionRatio) /* minInputBufferSize */,
+            kNumOutputBuffers, mimeType, kMinCompressionRatio);
+
     iUseAndroidNativeBuffer[OMX_DirInput] = OMX_FALSE;
     iUseAndroidNativeBuffer[OMX_DirOutput] = OMX_FALSE;
 }
@@ -185,7 +175,7 @@ SPRDMPEG4Decoder::~SPRDMPEG4Decoder() {
 
     while (mSetFreqCount > 0)
     {
-        set_ddr_freq("0");
+        setDdrFreq(0);
         mSetFreqCount--;
     }
 
@@ -193,120 +183,19 @@ SPRDMPEG4Decoder::~SPRDMPEG4Decoder() {
     mHandle = NULL;
 }
 
-void SPRDMPEG4Decoder::initPorts() {
-    OMX_PARAM_PORTDEFINITIONTYPE def;
-    InitOMXParams(&def);
-
-    def.nPortIndex = 0;
-    def.eDir = OMX_DirInput;
-    def.nBufferCountMin = 1;
-    def.nBufferCountActual = kNumInputBuffers;
-    def.nBufferSize = 160*1024; ///8192;
-    def.bEnabled = OMX_TRUE;
-    def.bPopulated = OMX_FALSE;
-    def.eDomain = OMX_PortDomainVideo;
-    def.bBuffersContiguous = OMX_FALSE;
-    def.nBufferAlignment = 1;
-
-    def.format.video.cMIMEType =
-        (mMode == MODE_MPEG4)
-        ? const_cast<char *>(MEDIA_MIMETYPE_VIDEO_MPEG4)
-        : const_cast<char *>(MEDIA_MIMETYPE_VIDEO_H263);
-
-    def.format.video.pNativeRender = NULL;
-    def.format.video.nFrameWidth = mWidth;
-    def.format.video.nFrameHeight = mHeight;
-    def.format.video.nStride = def.format.video.nFrameWidth;
-    def.format.video.nSliceHeight = def.format.video.nFrameHeight;
-    def.format.video.nBitrate = 0;
-    def.format.video.xFramerate = 0;
-    def.format.video.bFlagErrorConcealment = OMX_FALSE;
-
-    def.format.video.eCompressionFormat =
-        mMode == MODE_MPEG4 ? OMX_VIDEO_CodingMPEG4 : OMX_VIDEO_CodingH263;
-
-    def.format.video.eColorFormat = OMX_COLOR_FormatUnused;
-    def.format.video.pNativeWindow = NULL;
-
-    addPort(def);
-
-    def.nPortIndex = 1;
-    def.eDir = OMX_DirOutput;
-    def.nBufferCountMin = 2;
-    def.nBufferCountActual = kNumOutputBuffers;
-    def.bEnabled = OMX_TRUE;
-    def.bPopulated = OMX_FALSE;
-    def.eDomain = OMX_PortDomainVideo;
-    def.bBuffersContiguous = OMX_FALSE;
-    def.nBufferAlignment = 2;
-
-    def.format.video.cMIMEType = const_cast<char *>(MEDIA_MIMETYPE_VIDEO_RAW);
-    def.format.video.pNativeRender = NULL;
-    def.format.video.nFrameWidth = mWidth;
-    def.format.video.nFrameHeight = mHeight;
-    def.format.video.nStride = def.format.video.nFrameWidth;
-    def.format.video.nSliceHeight = def.format.video.nFrameHeight;
-    def.format.video.nBitrate = 0;
-    def.format.video.xFramerate = 0;
-    def.format.video.bFlagErrorConcealment = OMX_FALSE;
-    def.format.video.eCompressionFormat = OMX_VIDEO_CodingUnused;
-    def.format.video.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
-    def.format.video.pNativeWindow = NULL;
-
-    def.nBufferSize =
-        (def.format.video.nFrameWidth * def.format.video.nFrameHeight * 3) / 2;
-
-    addPort(def);
-}
-
-void SPRDMPEG4Decoder::set_ddr_freq(const char* freq_in_khz)
+void SPRDMPEG4Decoder::changeDdrFreq()
 {
-    const char* const set_freq = "/sys/devices/platform/scxx30-dmcfreq.0/devfreq/scxx30-dmcfreq.0/ondemand/set_freq";
-    FILE* fp = fopen(set_freq, "w");
-    if (fp != NULL)
-    {
-        fprintf(fp, "%s", freq_in_khz);
-        ALOGE("set ddr freq to %skhz", freq_in_khz);
-        fclose(fp);
-    }
-    else
-    {
-        ALOGE("Failed to open %s", set_freq);
-    }
-}
-
-void SPRDMPEG4Decoder::change_ddr_freq()
-{
-    if(!mDecoderSwFlag)
-	{
-        uint32_t frame_size = mWidth * mHeight;
-        char* ddr_freq;
-
-        if(frame_size > 1280*720)
-        {
-            ddr_freq = "500000";
-        }
-#ifdef VIDEODEC_CURRENT_OPT
-        else if(frame_size > 864*480)
-        {
-            ddr_freq = "300000";
-        }
-#else
-        else if(frame_size > 720*576)
-        {
-            ddr_freq = "400000";
-        }
-        else if(frame_size > 320*240)
-        {
-            ddr_freq = "300000";
-        }
-#endif
-        else
-        {
-            ddr_freq = "200000";
-        }
-        set_ddr_freq(ddr_freq);
-        mSetFreqCount ++;
+    if (!mDecoderSwFlag) {
+        uint32_t frameSize = mWidth * mHeight;
+        uint32_t ddrFreq = 200000;
+        if(frameSize > 1280 * 720)
+            ddrFreq = 500000;
+        else if(frameSize > 720 * 576)
+            ddrFreq = 400000;
+        else if(frameSize > 320 * 240)
+            ddrFreq = 300000;
+        setDdrFreq(ddrFreq);
+        ++mSetFreqCount;
     }
 }
 
@@ -415,167 +304,15 @@ void SPRDMPEG4Decoder::releaseDecoder() {
     }
 }
 
-OMX_ERRORTYPE SPRDMPEG4Decoder::internalGetParameter(
-    OMX_INDEXTYPE index, OMX_PTR params) {
-    switch (index) {
-    case OMX_IndexParamVideoPortFormat:
-    {
-        OMX_VIDEO_PARAM_PORTFORMATTYPE *formatParams =
-            (OMX_VIDEO_PARAM_PORTFORMATTYPE *)params;
-
-        if (formatParams->nPortIndex > 1) {
-            return OMX_ErrorUndefined;
-        }
-
-        if (formatParams->nIndex != 0) {
-            return OMX_ErrorNoMore;
-        }
-
-        if (formatParams->nPortIndex == 0) {
-            formatParams->eCompressionFormat =
-                (mMode == MODE_MPEG4)
-                ? OMX_VIDEO_CodingMPEG4 : OMX_VIDEO_CodingH263;
-
-            formatParams->eColorFormat = OMX_COLOR_FormatUnused;
-            formatParams->xFramerate = 0;
-        } else {
-            CHECK_EQ(formatParams->nPortIndex, 1u);
-
-            PortInfo *pOutPort = editPortInfo(OMX_DirOutput);
-            ALOGI("internalGetParameter, OMX_IndexParamVideoPortFormat, eColorFormat: 0x%x",pOutPort->mDef.format.video.eColorFormat);
-            formatParams->eCompressionFormat = OMX_VIDEO_CodingUnused;
-            formatParams->eColorFormat = pOutPort->mDef.format.video.eColorFormat;//OMX_COLOR_FormatYUV420Planar;
-            formatParams->xFramerate = 0;
-        }
-
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamVideoProfileLevelQuerySupported:
-    {
-        OMX_VIDEO_PARAM_PROFILELEVELTYPE *profileLevel =
-            (OMX_VIDEO_PARAM_PROFILELEVELTYPE *) params;
-
-        if (profileLevel->nPortIndex != 0) {  // Input port only
-            ALOGE("Invalid port index: %ld", profileLevel->nPortIndex);
-            return OMX_ErrorUnsupportedIndex;
-        }
-
-        size_t index = profileLevel->nProfileIndex;
-        if (mMode == MODE_H263) {
-            size_t nProfileLevels =
-                sizeof(kH263ProfileLevels) / sizeof(kH263ProfileLevels[0]);
-            if (index >= nProfileLevels) {
-                return OMX_ErrorNoMore;
-            }
-
-            profileLevel->eProfile = kH263ProfileLevels[index].mProfile;
-            profileLevel->eLevel = kH263ProfileLevels[index].mLevel;
-        } else {
-            size_t nProfileLevels =
-                sizeof(kM4VProfileLevels) / sizeof(kM4VProfileLevels[0]);
-            if (index >= nProfileLevels) {
-                return OMX_ErrorNoMore;
-            }
-
-            profileLevel->eProfile = kM4VProfileLevels[index].mProfile;
-            profileLevel->eLevel = kM4VProfileLevels[index].mLevel;
-        }
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamEnableAndroidBuffers:
-    {
-        EnableAndroidNativeBuffersParams *peanbp = (EnableAndroidNativeBuffersParams *)params;
-        peanbp->enable = iUseAndroidNativeBuffer[OMX_DirOutput];
-        ALOGI("internalGetParameter, OMX_IndexParamEnableAndroidBuffers %d",peanbp->enable);
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamGetAndroidNativeBuffer:
-    {
-        GetAndroidNativeBufferUsageParams *pganbp;
-
-        pganbp = (GetAndroidNativeBufferUsageParams *)params;
-        if(mDecoderSwFlag || mIOMMUEnabled) {
-            pganbp->nUsage = GRALLOC_USAGE_SW_READ_OFTEN |GRALLOC_USAGE_SW_WRITE_OFTEN;
-        } else {
-            pganbp->nUsage = GRALLOC_USAGE_VIDEO_BUFFER|GRALLOC_USAGE_SW_READ_OFTEN|GRALLOC_USAGE_SW_WRITE_OFTEN;
-        }
-        ALOGI("internalGetParameter, OMX_IndexParamGetAndroidNativeBuffer %x",pganbp->nUsage);
-        return OMX_ErrorNone;
-    }
-
-    default:
-        return SprdSimpleOMXComponent::internalGetParameter(index, params);
-    }
-}
-
 OMX_ERRORTYPE SPRDMPEG4Decoder::internalSetParameter(
     OMX_INDEXTYPE index, const OMX_PTR params) {
     switch (index) {
-    case OMX_IndexParamStandardComponentRole:
-    {
-        const OMX_PARAM_COMPONENTROLETYPE *roleParams =
-            (const OMX_PARAM_COMPONENTROLETYPE *)params;
-
-        if (mMode == MODE_MPEG4) {
-            if (strncmp((const char *)roleParams->cRole,
-                        "video_decoder.mpeg4",
-                        OMX_MAX_STRINGNAME_SIZE - 1)) {
-                return OMX_ErrorUndefined;
-            }
-        } else {
-            if (strncmp((const char *)roleParams->cRole,
-                        "video_decoder.h263",
-                        OMX_MAX_STRINGNAME_SIZE - 1)) {
-                return OMX_ErrorUndefined;
-            }
-        }
-
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamVideoPortFormat:
-    {
-        OMX_VIDEO_PARAM_PORTFORMATTYPE *formatParams =
-            (OMX_VIDEO_PARAM_PORTFORMATTYPE *)params;
-
-        if (formatParams->nPortIndex > 1) {
-            return OMX_ErrorUndefined;
-        }
-
-        if (formatParams->nIndex != 0) {
-            return OMX_ErrorNoMore;
-        }
-
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamEnableAndroidBuffers:
-    {
-        EnableAndroidNativeBuffersParams *peanbp = (EnableAndroidNativeBuffersParams *)params;
-        PortInfo *pOutPort = editPortInfo(OMX_DirOutput);
-        if (peanbp->enable == OMX_FALSE) {
-            ALOGI("internalSetParameter, disable AndroidNativeBuffer");
-            iUseAndroidNativeBuffer[OMX_DirOutput] = OMX_FALSE;
-
-            pOutPort->mDef.format.video.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
-        } else {
-            ALOGI("internalSetParameter, enable AndroidNativeBuffer");
-            iUseAndroidNativeBuffer[OMX_DirOutput] = OMX_TRUE;
-
-            pOutPort->mDef.format.video.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
-        }
-        return OMX_ErrorNone;
-    }
-
     case OMX_IndexParamPortDefinition:
     {
         OMX_PARAM_PORTDEFINITIONTYPE *defParams =
             (OMX_PARAM_PORTDEFINITIONTYPE *)params;
 
-        if (defParams->nPortIndex > 1
+        if (defParams->nPortIndex > kMaxPortIndex
                 || defParams->nSize
                 != sizeof(OMX_PARAM_PORTDEFINITIONTYPE)) {
             return OMX_ErrorUndefined;
@@ -598,15 +335,15 @@ OMX_ERRORTYPE SPRDMPEG4Decoder::internalSetParameter(
 
         memcpy(&port->mDef.format.video, &defParams->format.video, sizeof(OMX_VIDEO_PORTDEFINITIONTYPE));
 
-        if(defParams->nPortIndex == 1) {
+        if(defParams->nPortIndex == kOutputPortIndex) {
             port->mDef.format.video.nStride = port->mDef.format.video.nFrameWidth;
             port->mDef.format.video.nSliceHeight = port->mDef.format.video.nFrameHeight;
             mWidth = port->mDef.format.video.nFrameWidth;
             mHeight = port->mDef.format.video.nFrameHeight;
-            mCropRight = mWidth - 1;
-            mCropBottom = mHeight - 1;
+            mCropWidth = mWidth;
+            mCropHeight = mHeight;
             port->mDef.nBufferSize =(((mWidth + 15) & -16)* ((mHeight + 15) & -16) * 3) / 2;
-            change_ddr_freq();
+            changeDdrFreq();
         }
 
         if (!((mWidth < 1280 && mHeight < 720) || (mWidth < 720 && mHeight < 1280))) {
@@ -623,7 +360,7 @@ OMX_ERRORTYPE SPRDMPEG4Decoder::internalSetParameter(
     }
 
     default:
-        return SprdSimpleOMXComponent::internalSetParameter(index, params);
+        return SprdVideoDecoderOMXComponent::internalSetParameter(index, params);
     }
 }
 
@@ -808,30 +545,6 @@ OMX_ERRORTYPE SPRDMPEG4Decoder::freeBuffer(
     }
 }
 
-OMX_ERRORTYPE SPRDMPEG4Decoder::getConfig(
-    OMX_INDEXTYPE index, OMX_PTR params) {
-    switch (index) {
-    case OMX_IndexConfigCommonOutputCrop:
-    {
-        OMX_CONFIG_RECTTYPE *rectParams = (OMX_CONFIG_RECTTYPE *)params;
-
-        if (rectParams->nPortIndex != 1) {
-            return OMX_ErrorUndefined;
-        }
-
-        rectParams->nLeft = mCropLeft;
-        rectParams->nTop = mCropTop;
-        rectParams->nWidth = mCropRight - mCropLeft + 1;
-        rectParams->nHeight = mCropBottom - mCropTop + 1;
-
-        return OMX_ErrorNone;
-    }
-
-    default:
-        return OMX_ErrorUnsupportedIndex;
-    }
-}
-
 void SPRDMPEG4Decoder::onQueueFilled(OMX_U32 portIndex) {
     if (mSignalledError || mOutputPortSettingsChange != NONE) {
         return;
@@ -922,9 +635,6 @@ void SPRDMPEG4Decoder::onQueueFilled(OMX_U32 portIndex) {
                 vol_size = inHeader->nFilledLen;
             }
 
-            MP4DecodingMode mode =
-                (mMode == MODE_MPEG4) ? MPEG4_MODE : H263_MODE;
-
             MMDecVideoFormat video_format;
 
             video_format.i_extra = vol_size;
@@ -938,9 +648,9 @@ void SPRDMPEG4Decoder::onQueueFilled(OMX_U32 portIndex) {
                 video_format.p_extra_phy = 0;
             }
 
-            if(mode == H263_MODE) {
+            if(mCodingType == OMX_VIDEO_CodingH263) {
                 video_format.video_std = ITU_H263;
-            } else if(mode == MPEG4_MODE) {
+            } else if (mCodingType == OMX_VIDEO_CodingMPEG4) {
                 video_format.video_std = MPEG4;
             } else {
                 video_format.video_std = FLV_V1;
@@ -964,7 +674,7 @@ void SPRDMPEG4Decoder::onQueueFilled(OMX_U32 portIndex) {
 
             mInitialized = true;
 
-            if (mode == MPEG4_MODE) {
+            if (mCodingType == OMX_VIDEO_CodingMPEG4) {
                 int32_t buf_width, buf_height;
 
                 (*mMp4GetBufferDimensions)(mHandle, &buf_width, &buf_height);
@@ -1117,16 +827,13 @@ void SPRDMPEG4Decoder::onQueueFilled(OMX_U32 portIndex) {
         } else if (decRet == MMDEC_STREAM_ERROR) {
             ALOGE("failed to decode video frame, stream error");
 //            notify(OMX_EventError, OMX_ErrorStreamCorrupt, 0, NULL);
-        } else if (decRet == MMDEC_HW_ERROR)
-        {
+        } else if (decRet == MMDEC_HW_ERROR) {
             ALOGE("failed to decode video frame, hardware error");
 //            notify(OMX_EventError, OMX_ErrorHardware, 0, NULL);
-        } else if (decRet == MMDEC_NOT_SUPPORTED)
-        {
+        } else if (decRet == MMDEC_NOT_SUPPORTED) {
             ALOGE("failed to decode video frame, unsupported");
             notify(OMX_EventError, OMX_ErrorUnsupportedSetting, 0, NULL);
-        } else
-        {
+        } else {
             ALOGE("now, we don't take care of the decoder return: %d", decRet);
         }
 
@@ -1247,14 +954,14 @@ bool SPRDMPEG4Decoder::portSettingsChanged() {
     CHECK_LE(disp_height, buf_height);
 
     if(mDecoderSwFlag) {
-        if (mCropRight != disp_width  - 1
-                || mCropBottom != disp_height  - 1) {
-            ALOGI("%s, %d, SwDecoder, mCropLeft: %d, mCropTop: %d, mCropRight: %d, mCropBottom: %d", __FUNCTION__, __LINE__, mCropLeft, mCropTop, mCropRight, mCropBottom);
+        if (mCropWidth != disp_width
+                || mCropHeight != disp_height) {
+            ALOGI("%s, %d, SwDecoder, mCropLeft: %d, mCropTop: %d, mCropWidth: %d, mCropHeight: %d", __FUNCTION__, __LINE__, mCropLeft, mCropTop, mCropWidth, mCropHeight);
 
             mCropLeft = 0;
             mCropTop = 0;
-            mCropRight = disp_width  - 1;
-            mCropBottom = disp_height  - 1;
+            mCropWidth = disp_width;
+            mCropHeight = disp_height;
 
             notify(OMX_EventPortSettingsChanged,
                    1,
@@ -1262,14 +969,14 @@ bool SPRDMPEG4Decoder::portSettingsChanged() {
                    NULL);
         }
     } else {
-        if (mCropRight != disp_width - 1
-                || mCropBottom != disp_height - 1) {
-            ALOGI("%s, %d, mCropLeft: %d, mCropTop: %d, mCropRight: %d, mCropBottom: %d", __FUNCTION__, __LINE__, mCropLeft, mCropTop, mCropRight, mCropBottom);
+        if (mCropWidth != disp_width
+                || mCropHeight != disp_height) {
+            ALOGI("%s, %d, SwDecoder, mCropLeft: %d, mCropTop: %d, mCropWidth: %d, mCropHeight: %d", __FUNCTION__, __LINE__, mCropLeft, mCropTop, mCropWidth, mCropHeight);
 
             mCropLeft = 0;
             mCropTop = 0;
-            mCropRight = disp_width - 1;
-            mCropBottom = disp_height - 1;
+            mCropWidth = disp_width;
+            mCropHeight = disp_height;
 
             notify(OMX_EventPortSettingsChanged,
                    1,
@@ -1290,9 +997,9 @@ bool SPRDMPEG4Decoder::portSettingsChanged() {
         ALOGI("%s, %d, mWidth: %d, mHeight: %d", __FUNCTION__, __LINE__, mWidth, mHeight);
         mWidth = buf_width;
         mHeight = buf_height;
-        change_ddr_freq();
+        changeDdrFreq();
 
-        updatePortDefinitions();
+        updatePortDefinitions(true, true);
 
         (*mMP4DecReleaseRefBuffers)(mHandle);
 
@@ -1313,54 +1020,10 @@ void SPRDMPEG4Decoder::onPortFlushCompleted(OMX_U32 portIndex) {
     }
 }
 
-void SPRDMPEG4Decoder::onPortEnableCompleted(OMX_U32 portIndex, bool enabled) {
-    if (portIndex != 1) {
-        return;
-    }
-
-    switch (mOutputPortSettingsChange) {
-    case NONE:
-        break;
-
-    case AWAITING_DISABLED:
-    {
-        CHECK(!enabled);
-        mOutputPortSettingsChange = AWAITING_ENABLED;
-        break;
-    }
-
-    default:
-    {
-        CHECK_EQ((int)mOutputPortSettingsChange, (int)AWAITING_ENABLED);
-        CHECK(enabled);
-        mOutputPortSettingsChange = NONE;
-        break;
-    }
-    }
-}
-
 void SPRDMPEG4Decoder::onPortFlushPrepare(OMX_U32 portIndex) {
     if(portIndex == OMX_DirOutput) {
         (*mMP4DecReleaseRefBuffers)(mHandle);
     }
-}
-
-void SPRDMPEG4Decoder::updatePortDefinitions() {
-    OMX_PARAM_PORTDEFINITIONTYPE *def = &editPortInfo(0)->mDef;
-    def->format.video.nFrameWidth = mWidth;
-    def->format.video.nFrameHeight = mHeight;
-    def->format.video.nStride = def->format.video.nFrameWidth;
-    def->format.video.nSliceHeight = def->format.video.nFrameHeight;
-
-    def = &editPortInfo(1)->mDef;
-    def->format.video.nFrameWidth = mWidth;
-    def->format.video.nFrameHeight = mHeight;
-    def->format.video.nStride = def->format.video.nFrameWidth;
-    def->format.video.nSliceHeight = def->format.video.nFrameHeight;
-
-    def->nBufferSize =
-        (((def->format.video.nFrameWidth + 15) & -16)
-         * ((def->format.video.nFrameHeight + 15) & -16) * 3) / 2;
 }
 
 int32_t SPRDMPEG4Decoder::extMemoryAllocWrapper(
@@ -1446,27 +1109,6 @@ int SPRDMPEG4Decoder::VSP_unbind_cb(void *pHeader,int flag) {
     }
 
     return 0;
-}
-
-OMX_ERRORTYPE SPRDMPEG4Decoder::getExtensionIndex(
-    const char *name, OMX_INDEXTYPE *index) {
-
-    ALOGI("getExtensionIndex, name: %s",name);
-    if(strcmp(name, SPRD_INDEX_PARAM_ENABLE_ANB) == 0) {
-        ALOGI("getExtensionIndex:%s",SPRD_INDEX_PARAM_ENABLE_ANB);
-        *index = (OMX_INDEXTYPE) OMX_IndexParamEnableAndroidBuffers;
-        return OMX_ErrorNone;
-    } else if (strcmp(name, SPRD_INDEX_PARAM_GET_ANB) == 0) {
-        ALOGI("getExtensionIndex:%s",SPRD_INDEX_PARAM_GET_ANB);
-        *index = (OMX_INDEXTYPE) OMX_IndexParamGetAndroidNativeBuffer;
-        return OMX_ErrorNone;
-    }	else if (strcmp(name, SPRD_INDEX_PARAM_USE_ANB) == 0) {
-        ALOGI("getExtensionIndex:%s",SPRD_INDEX_PARAM_USE_ANB);
-        *index = OMX_IndexParamUseAndroidNativeBuffer2;
-        return OMX_ErrorNone;
-    }
-
-    return OMX_ErrorNotImplemented;
 }
 
 bool SPRDMPEG4Decoder::openDecoder(const char* libName) {
@@ -1576,8 +1218,7 @@ bool SPRDMPEG4Decoder::openDecoder(const char* libName) {
 }  // namespace android
 
 android::SprdOMXComponent *createSprdOMXComponent(
-    const char *name, const OMX_CALLBACKTYPE *callbacks,
-    OMX_PTR appData, OMX_COMPONENTTYPE **component) {
+        const char *name, const OMX_CALLBACKTYPE *callbacks,
+        OMX_PTR appData, OMX_COMPONENTTYPE **component) {
     return new android::SPRDMPEG4Decoder(name, callbacks, appData, component);
 }
-

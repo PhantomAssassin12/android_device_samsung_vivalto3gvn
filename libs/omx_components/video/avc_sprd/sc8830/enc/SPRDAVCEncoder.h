@@ -69,7 +69,9 @@ private:
     int32 mPbuf_yuv_p;
     int32 mPbuf_yuv_size;
 
+#if 0
     bool mIOMMUEnabled;
+#endif
     uint8_t *mPbuf_inter;
 
     sp<MemoryHeapIon> mPmem_stream;

@@ -16,25 +16,23 @@
 
 #define LOG_NDEBUG 0
 #define LOG_TAG "SPRDAVCDecoder"
-#include <utils/Log.h>
 
-#include "SPRDAVCDecoder.h"
-
+#include <media/hardware/HardwareAPI.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/IOMX.h>
 
-#include <dlfcn.h>
-#include <media/hardware/HardwareAPI.h>
 #include <ui/GraphicBufferMapper.h>
+#include <utils/Log.h>
 
-#include "gralloc_priv.h"
-#include "ion_sprd.h"
+#include <dlfcn.h>
+
+#include <gralloc_priv.h>
+#include <ion_sprd.h>
+
+#include "SPRDAVCDecoder.h"
 #include "avc_dec_api.h"
-
-//#define VIDEODEC_CURRENT_OPT  /*only open for SAMSUNG currently*/
-
 
 namespace android {
 
@@ -91,44 +89,29 @@ static const CodecProfileLevel kProfileLevels[] = {
     { OMX_VIDEO_AVCProfileHigh, OMX_VIDEO_AVCLevel51 },
 };
 
-template<class T>
-static void InitOMXParams(T *params) {
-    params->nSize = sizeof(T);
-    params->nVersion.s.nVersionMajor = 1;
-    params->nVersion.s.nVersionMinor = 0;
-    params->nVersion.s.nRevision = 0;
-    params->nVersion.s.nStep = 0;
-}
-
 SPRDAVCDecoder::SPRDAVCDecoder(
     const char *name,
     const OMX_CALLBACKTYPE *callbacks,
     OMX_PTR appData,
     OMX_COMPONENTTYPE **component)
-    : SprdSimpleOMXComponent(name, callbacks, appData, component),
+    : SprdVideoDecoderOMXComponent(name, "video_decoder.avc", OMX_VIDEO_CodingAVC,
+            kProfileLevels, ARRAY_SIZE(kProfileLevels),
+            320 /* width */, 240 /* height */, callbacks, appData, component),
       mHandle(new tagAVCHandle),
       mInputBufferCount(0),
-      mWidth(320),
-      mHeight(240),
       mPictureSize(mWidth * mHeight * 3 / 2),
-      mCropLeft(0),
-      mCropTop(0),
-      mCropWidth(mWidth),
-      mCropHeight(mHeight),
       mMaxWidth(352),
       mMaxHeight(288),
       mPicId(0),
       mSetFreqCount(0),
       mHeadersDecoded(false),
       mEOSStatus(INPUT_DATA_AVAILABLE),
-      mOutputPortSettingsChange(NONE),
       mSignalledError(false),
       mLibHandle(NULL),
       mDecoderSwFlag(false),
       mChangeToSwDec(false),
       mAllocateBuffers(false),
       mNeedIVOP(true),
-      mIOMMUEnabled(false),
       mCodecInterBuffer(NULL),
       mCodecExtraBuffer(NULL),
       mPbuf_extra_v(NULL),
@@ -148,28 +131,11 @@ SPRDAVCDecoder::SPRDAVCDecoder(
 
     ALOGI("Construct SPRDAVCDecoder, this: %0x", (void *)this);
 
-    //read config flag
-#define USE_SW_DECODER	0x01
-#define USE_HW_DECODER	0x00
-
-    uint8 video_cfg = USE_HW_DECODER;
-    FILE *fp = fopen("/data/data/com.sprd.test.videoplayer/app_decode/flag", "rb");
-    if (fp != NULL) {
-        fread(&video_cfg, sizeof(uint8), 1, fp);
-        fclose(fp);
-    }
-    ALOGI("%s, video_cfg: %d", __FUNCTION__, video_cfg);
-
-    bool ret = false;
-    if (USE_HW_DECODER == video_cfg) {
-        ret = openDecoder("libomx_avcdec_hw_sprd.so");
-    }
-
-    if(ret == false) {
+    bool ret = openDecoder("libomx_avcdec_hw_sprd.so");
+    if (ret == false) {
         ret = openDecoder("libomx_avcdec_sw_sprd.so");
         mDecoderSwFlag = true;
     }
-
     CHECK_EQ(ret, true);
 
     mIOMMUEnabled = MemoryHeapIon::Mm_iommu_is_enabled();
@@ -186,7 +152,14 @@ SPRDAVCDecoder::SPRDAVCDecoder(
         }
     }
 
-    initPorts();
+    const size_t kMinCompressionRatio = 1;
+    const size_t kMaxOutputBufferSize = (mWidth * mHeight * 3) / 2;
+    initPorts(
+            kNumInputBuffers /* numInputBuffers */,
+            kMaxOutputBufferSize / kMinCompressionRatio /* minInputBufferSize */,
+            kNumOutputBuffers /* numOutputBuffers */,
+            MEDIA_MIMETYPE_VIDEO_AVC,
+            kMinCompressionRatio);
 
     iUseAndroidNativeBuffer[OMX_DirInput] = OMX_FALSE;
     iUseAndroidNativeBuffer[OMX_DirOutput] = OMX_FALSE;
@@ -197,10 +170,9 @@ SPRDAVCDecoder::~SPRDAVCDecoder() {
 
     releaseDecoder();
 
-    while (mSetFreqCount > 0)
-    {
-        set_ddr_freq("0");
-        mSetFreqCount--;
+    while (mSetFreqCount > 0) {
+        setDdrFreq(0);
+        --mSetFreqCount;
     }
 
     delete mHandle;
@@ -212,113 +184,19 @@ SPRDAVCDecoder::~SPRDAVCDecoder() {
     CHECK(inQueue.empty());
 }
 
-void SPRDAVCDecoder::initPorts() {
-    OMX_PARAM_PORTDEFINITIONTYPE def;
-    InitOMXParams(&def);
-
-    def.nPortIndex = kInputPortIndex;
-    def.eDir = OMX_DirInput;
-    def.nBufferCountMin = 1;
-    def.nBufferCountActual = kNumInputBuffers;
-    def.nBufferSize = 128*1024 ;///8192;
-    def.bEnabled = OMX_TRUE;
-    def.bPopulated = OMX_FALSE;
-    def.eDomain = OMX_PortDomainVideo;
-    def.bBuffersContiguous = OMX_FALSE;
-    def.nBufferAlignment = 1;
-
-    def.format.video.cMIMEType = const_cast<char *>(MEDIA_MIMETYPE_VIDEO_AVC);
-    def.format.video.pNativeRender = NULL;
-    def.format.video.nFrameWidth = mWidth;
-    def.format.video.nFrameHeight = mHeight;
-    def.format.video.nStride = def.format.video.nFrameWidth;
-    def.format.video.nSliceHeight = def.format.video.nFrameHeight;
-    def.format.video.nBitrate = 0;
-    def.format.video.xFramerate = 0;
-    def.format.video.bFlagErrorConcealment = OMX_FALSE;
-    def.format.video.eCompressionFormat = OMX_VIDEO_CodingAVC;
-    def.format.video.eColorFormat = OMX_COLOR_FormatUnused;
-    def.format.video.pNativeWindow = NULL;
-
-    addPort(def);
-
-    def.nPortIndex = kOutputPortIndex;
-    def.eDir = OMX_DirOutput;
-    def.nBufferCountMin = 2;
-    def.nBufferCountActual = kNumOutputBuffers;
-    def.bEnabled = OMX_TRUE;
-    def.bPopulated = OMX_FALSE;
-    def.eDomain = OMX_PortDomainVideo;
-    def.bBuffersContiguous = OMX_FALSE;
-    def.nBufferAlignment = 2;
-
-    def.format.video.cMIMEType = const_cast<char *>(MEDIA_MIMETYPE_VIDEO_RAW);
-    def.format.video.pNativeRender = NULL;
-    def.format.video.nFrameWidth = mWidth;
-    def.format.video.nFrameHeight = mHeight;
-    def.format.video.nStride = def.format.video.nFrameWidth;
-    def.format.video.nSliceHeight = def.format.video.nFrameHeight;
-    def.format.video.nBitrate = 0;
-    def.format.video.xFramerate = 0;
-    def.format.video.bFlagErrorConcealment = OMX_FALSE;
-    def.format.video.eCompressionFormat = OMX_VIDEO_CodingUnused;
-    def.format.video.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
-    def.format.video.pNativeWindow = NULL;
-
-    def.nBufferSize =
-        (def.format.video.nFrameWidth * def.format.video.nFrameHeight * 3) / 2;
-
-    addPort(def);
-}
-
-void SPRDAVCDecoder::set_ddr_freq(const char* freq_in_khz)
+void SPRDAVCDecoder::changeDdrFreq()
 {
-    const char* const set_freq = "/sys/devices/platform/scxx30-dmcfreq.0/devfreq/scxx30-dmcfreq.0/ondemand/set_freq";
-    FILE* fp = fopen(set_freq, "w");
-    if (fp != NULL)
-    {
-        fprintf(fp, "%s", freq_in_khz);
-        ALOGE("set ddr freq to %skhz", freq_in_khz);
-        fclose(fp);
-    }
-    else
-    {
-        ALOGE("Failed to open %s", set_freq);
-    }
-}
-
-void SPRDAVCDecoder::change_ddr_freq()
-{
-    if(!mDecoderSwFlag)
-	{
-        uint32_t frame_size = mWidth * mHeight;
-        char* ddr_freq;
-
-        if(frame_size > 1280*720)
-        {
-            ddr_freq = "500000";
-        }
-#ifdef VIDEODEC_CURRENT_OPT
-        else if(frame_size > 864*480)
-        {
-            ddr_freq = "300000";
-        }
-#else
-        else if(frame_size > 720*576)
-        {
-            ddr_freq = "400000";
-        }
-        else if(frame_size > 320*240)
-        {
-            ddr_freq = "300000";
-        }
-#endif
-        else
-        {
-            ddr_freq = "200000";
-        }
-        set_ddr_freq(ddr_freq);
-        mSetFreqCount ++;
+    if (!mDecoderSwFlag) {
+        uint32_t frameSize = mWidth * mHeight;
+        uint32_t ddrFreq = 200000;
+        if(frameSize > 1280 * 720)
+            ddrFreq = 500000;
+        else if(frameSize > 720 * 576)
+            ddrFreq = 400000;
+        else if(frameSize > 320 * 240)
+            ddrFreq = 300000;
+        setDdrFreq(ddrFreq);
+        ++mSetFreqCount;
     }
 }
 
@@ -443,139 +321,9 @@ void SPRDAVCDecoder::releaseDecoder() {
     }
 }
 
-OMX_ERRORTYPE SPRDAVCDecoder::internalGetParameter(
-    OMX_INDEXTYPE index, OMX_PTR params) {
-    switch (index) {
-    case OMX_IndexParamVideoPortFormat:
-    {
-        OMX_VIDEO_PARAM_PORTFORMATTYPE *formatParams =
-            (OMX_VIDEO_PARAM_PORTFORMATTYPE *)params;
-
-        if (formatParams->nPortIndex > kOutputPortIndex) {
-            return OMX_ErrorUndefined;
-        }
-
-        if (formatParams->nIndex != 0) {
-            return OMX_ErrorNoMore;
-        }
-
-        if (formatParams->nPortIndex == kInputPortIndex) {
-            formatParams->eCompressionFormat = OMX_VIDEO_CodingAVC;
-            formatParams->eColorFormat = OMX_COLOR_FormatUnused;
-            formatParams->xFramerate = 0;
-        } else {
-            CHECK(formatParams->nPortIndex == kOutputPortIndex);
-
-            PortInfo *pOutPort = editPortInfo(OMX_DirOutput);
-            ALOGI("internalGetParameter, OMX_IndexParamVideoPortFormat, eColorFormat: 0x%x",pOutPort->mDef.format.video.eColorFormat);
-            formatParams->eCompressionFormat = OMX_VIDEO_CodingUnused;
-            formatParams->eColorFormat = pOutPort->mDef.format.video.eColorFormat;
-            formatParams->xFramerate = 0;
-        }
-
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamVideoProfileLevelQuerySupported:
-    {
-        OMX_VIDEO_PARAM_PROFILELEVELTYPE *profileLevel =
-            (OMX_VIDEO_PARAM_PROFILELEVELTYPE *) params;
-
-        if (profileLevel->nPortIndex != kInputPortIndex) {
-            ALOGE("Invalid port index: %ld", profileLevel->nPortIndex);
-            return OMX_ErrorUnsupportedIndex;
-        }
-
-        size_t index = profileLevel->nProfileIndex;
-        size_t nProfileLevels =
-            sizeof(kProfileLevels) / sizeof(kProfileLevels[0]);
-        if (index >= nProfileLevels) {
-            return OMX_ErrorNoMore;
-        }
-
-        profileLevel->eProfile = kProfileLevels[index].mProfile;
-        profileLevel->eLevel = kProfileLevels[index].mLevel;
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamEnableAndroidBuffers:
-    {
-        EnableAndroidNativeBuffersParams *peanbp = (EnableAndroidNativeBuffersParams *)params;
-        peanbp->enable = iUseAndroidNativeBuffer[OMX_DirOutput];
-        ALOGI("internalGetParameter, OMX_IndexParamEnableAndroidBuffers %d",peanbp->enable);
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamGetAndroidNativeBuffer:
-    {
-        GetAndroidNativeBufferUsageParams *pganbp;
-
-        pganbp = (GetAndroidNativeBufferUsageParams *)params;
-        if(mDecoderSwFlag || mIOMMUEnabled) {
-            pganbp->nUsage = GRALLOC_USAGE_SW_READ_OFTEN |GRALLOC_USAGE_SW_WRITE_OFTEN;
-        } else {
-            pganbp->nUsage = GRALLOC_USAGE_VIDEO_BUFFER | GRALLOC_USAGE_SW_READ_OFTEN |GRALLOC_USAGE_SW_WRITE_OFTEN;
-        }
-        ALOGI("internalGetParameter, OMX_IndexParamGetAndroidNativeBuffer %x",pganbp->nUsage);
-        return OMX_ErrorNone;
-    }
-
-    default:
-        return SprdSimpleOMXComponent::internalGetParameter(index, params);
-    }
-}
-
 OMX_ERRORTYPE SPRDAVCDecoder::internalSetParameter(
     OMX_INDEXTYPE index, const OMX_PTR params) {
     switch (index) {
-    case OMX_IndexParamStandardComponentRole:
-    {
-        const OMX_PARAM_COMPONENTROLETYPE *roleParams =
-            (const OMX_PARAM_COMPONENTROLETYPE *)params;
-
-        if (strncmp((const char *)roleParams->cRole,
-                    "video_decoder.avc",
-                    OMX_MAX_STRINGNAME_SIZE - 1)) {
-            return OMX_ErrorUndefined;
-        }
-
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamVideoPortFormat:
-    {
-        OMX_VIDEO_PARAM_PORTFORMATTYPE *formatParams =
-            (OMX_VIDEO_PARAM_PORTFORMATTYPE *)params;
-
-        if (formatParams->nPortIndex > kOutputPortIndex) {
-            return OMX_ErrorUndefined;
-        }
-
-        if (formatParams->nIndex != 0) {
-            return OMX_ErrorNoMore;
-        }
-
-        return OMX_ErrorNone;
-    }
-
-    case OMX_IndexParamEnableAndroidBuffers:
-    {
-        EnableAndroidNativeBuffersParams *peanbp = (EnableAndroidNativeBuffersParams *)params;
-        PortInfo *pOutPort = editPortInfo(1);
-        if (peanbp->enable == OMX_FALSE) {
-            ALOGI("internalSetParameter, disable AndroidNativeBuffer");
-            iUseAndroidNativeBuffer[OMX_DirOutput] = OMX_FALSE;
-
-            pOutPort->mDef.format.video.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
-        } else {
-            ALOGI("internalSetParameter, enable AndroidNativeBuffer");
-            iUseAndroidNativeBuffer[OMX_DirOutput] = OMX_TRUE;
-
-            pOutPort->mDef.format.video.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
-        }
-        return OMX_ErrorNone;
-    }
-
     case OMX_IndexParamPortDefinition:
     {
         OMX_PARAM_PORTDEFINITIONTYPE *defParams =
@@ -603,7 +351,7 @@ OMX_ERRORTYPE SPRDAVCDecoder::internalSetParameter(
         }
 
         memcpy(&port->mDef.format.video, &defParams->format.video, sizeof(OMX_VIDEO_PORTDEFINITIONTYPE));
-        if(defParams->nPortIndex == kOutputPortIndex) {
+        if (defParams->nPortIndex == kOutputPortIndex) {
             port->mDef.format.video.nStride = port->mDef.format.video.nFrameWidth;
             port->mDef.format.video.nSliceHeight = port->mDef.format.video.nFrameHeight;
             mWidth = port->mDef.format.video.nFrameWidth;
@@ -612,7 +360,7 @@ OMX_ERRORTYPE SPRDAVCDecoder::internalSetParameter(
             mCropHeight = mHeight;
             port->mDef.nBufferSize =(((mWidth + 15) & -16)* ((mHeight + 15) & -16) * 3) / 2;
             mPictureSize = port->mDef.nBufferSize;
-            change_ddr_freq();
+            changeDdrFreq();
         }
 
         if (!((mWidth < 1280 && mHeight < 720) || (mWidth < 720 && mHeight < 1280))) {
@@ -625,11 +373,15 @@ OMX_ERRORTYPE SPRDAVCDecoder::internalSetParameter(
                 port->mDef.nBufferSize = 256*1024;
         }
 
+#if 0
         return OMX_ErrorNone;
+#else
+        return SprdVideoDecoderOMXComponent::internalSetParameter(index, params);
+#endif
     }
 
     default:
-        return SprdSimpleOMXComponent::internalSetParameter(index, params);
+        return SprdVideoDecoderOMXComponent::internalSetParameter(index, params);
     }
 }
 
@@ -815,30 +567,6 @@ OMX_ERRORTYPE SPRDAVCDecoder::freeBuffer(
     }
 }
 
-OMX_ERRORTYPE SPRDAVCDecoder::getConfig(
-    OMX_INDEXTYPE index, OMX_PTR params) {
-    switch (index) {
-    case OMX_IndexConfigCommonOutputCrop:
-    {
-        OMX_CONFIG_RECTTYPE *rectParams = (OMX_CONFIG_RECTTYPE *)params;
-
-        if (rectParams->nPortIndex != 1) {
-            return OMX_ErrorUndefined;
-        }
-
-        rectParams->nLeft = mCropLeft;
-        rectParams->nTop = mCropTop;
-        rectParams->nWidth = mCropWidth;
-        rectParams->nHeight = mCropHeight;
-
-        return OMX_ErrorNone;
-    }
-
-    default:
-        return OMX_ErrorUnsupportedIndex;
-    }
-}
-
 void dump_bs( uint8* pBuffer,int32 aInBufSize) {
     FILE *fp = fopen("/data/video_es.m4v","ab");
     fwrite(pBuffer,1,aInBufSize,fp);
@@ -936,7 +664,7 @@ void SPRDAVCDecoder::onQueueFilled(OMX_U32 portIndex) {
 //            continue;
         }
 
-        if(inHeader->nFilledLen == 0) {
+        if (inHeader->nFilledLen == 0) {
             inInfo->mOwnedByUs = false;
             inQueue.erase(inQueue.begin());
             inInfo = NULL;
@@ -1057,7 +785,7 @@ void SPRDAVCDecoder::onQueueFilled(OMX_U32 portIndex) {
         MMDecRet ret;
         ret = (*mH264DecGetInfo)(mHandle, &decoderInfo);
         if(ret == MMDEC_OK) {
-            if (!((decoderInfo.picWidth<= mMaxWidth&& decoderInfo.picHeight<= mMaxHeight)
+            if (!((decoderInfo.picWidth <= mMaxWidth && decoderInfo.picHeight <= mMaxHeight)
                     || (decoderInfo.picWidth <= mMaxHeight && decoderInfo.picHeight <= mMaxWidth))) {
                 ALOGE("[%d,%d] is out of range [%d, %d], failed to support this format.",
                       decoderInfo.picWidth, decoderInfo.picHeight, mMaxWidth, mMaxHeight);
@@ -1086,7 +814,7 @@ void SPRDAVCDecoder::onQueueFilled(OMX_U32 portIndex) {
             continue;
         }
 
-	bufferSize = dec_in.dataLen;
+        bufferSize = dec_in.dataLen;
         CHECK_LE(bufferSize, inHeader->nFilledLen);
         inHeader->nOffset += bufferSize;
         inHeader->nFilledLen -= bufferSize;
@@ -1115,17 +843,6 @@ bool SPRDAVCDecoder::handlePortSettingChangeEvent(const H264SwDecInfo *info) {
 //    ALOGI("%s, %d, mWidth: %d, mHeight: %d,  info->picWidth: %d,info->picHeight:%d, mPictureSize:%d ",
 //                __FUNCTION__, __LINE__,mWidth, mHeight,  info->picWidth, info->picHeight, mPictureSize);
 
-#if 0
-    if(!mDecoderSwFlag) {
-        ALOGI("%s, %d, picWidth: %d, picHeight: %d, numRef: %d, profile: 0x%x",
-              __FUNCTION__, __LINE__,info->picWidth, info->picHeight, info->numRefFrames, info->profile);
-        if ((!((info->picWidth <= 720 && info->picHeight <= 576) || (info->picWidth <= 576 && info->picHeight <= 720))) || (info->profile == 0x64) || (info->profile == 0x4d)) {
-            mDecoderSwFlag = true;
-            mChangeToSwDec = true;
-        }
-    }
-#endif
-
     OMX_PARAM_PORTDEFINITIONTYPE *def = &editPortInfo(kOutputPortIndex)->mDef;
     if ((mWidth != info->picWidth) || (mHeight != info->picHeight) ||
             (info->numRefFrames > def->nBufferCountActual-(2+1+info->has_b_frames))) {
@@ -1136,18 +853,30 @@ bool SPRDAVCDecoder::handlePortSettingChangeEvent(const H264SwDecInfo *info) {
         mPictureSize = mWidth * mHeight * 3 / 2;
         mCropWidth = mWidth;
         mCropHeight = mHeight;
-        change_ddr_freq();
+        changeDdrFreq();
 
         if (info->numRefFrames > def->nBufferCountActual-(2+1+info->has_b_frames)) {
             ALOGI("%s, %d, info->numRefFrames: %d, info->has_b_frames: %d, def->nBufferCountActual: %d", __FUNCTION__, __LINE__, info->numRefFrames, info->has_b_frames, def->nBufferCountActual);
             def->nBufferCountActual = info->numRefFrames + (2+1+info->has_b_frames);
         }
 
-        updatePortDefinitions();
+#if 0
+        updatePortDefinitions(true, true);
+#endif
+
         (*mH264Dec_ReleaseRefBuffers)(mHandle);
         notify(OMX_EventPortSettingsChanged, kOutputPortIndex, 0, NULL);
         mOutputPortSettingsChange = AWAITING_DISABLED;
+
+#if 1
+        bool portWillReset = false;
+        SprdVideoDecoderOMXComponent::handlePortSettingsChange(&portWillReset,
+            info->picWidth, info->picHeight, kCropChanged, true /* fakeStride */);
+        ALOGV("portWillReset: %d", portWillReset);
+        return portWillReset;
+#else
         return true;
+#endif
     }
 
     return false;
@@ -1163,7 +892,7 @@ bool SPRDAVCDecoder::handleCropRectEvent(const CropParams *crop) {
         mCropWidth = crop->cropOutWidth;
         mCropHeight = crop->cropOutHeight;
 
-        notify(OMX_EventPortSettingsChanged, 1,
+        notify(OMX_EventPortSettingsChanged, kOutputPortIndex,
                OMX_IndexConfigCommonOutputCrop, NULL);
 
         return true;
@@ -1251,52 +980,11 @@ void SPRDAVCDecoder::onPortFlushCompleted(OMX_U32 portIndex) {
     }
 }
 
-void SPRDAVCDecoder::onPortEnableCompleted(OMX_U32 portIndex, bool enabled) {
-    switch (mOutputPortSettingsChange) {
-    case NONE:
-        break;
-
-    case AWAITING_DISABLED:
-    {
-        CHECK(!enabled);
-        mOutputPortSettingsChange = AWAITING_ENABLED;
-        break;
-    }
-
-    default:
-    {
-        CHECK_EQ((int)mOutputPortSettingsChange, (int)AWAITING_ENABLED);
-        CHECK(enabled);
-        mOutputPortSettingsChange = NONE;
-        break;
-    }
-    }
-}
-
 void SPRDAVCDecoder::onPortFlushPrepare(OMX_U32 portIndex) {
     if(portIndex == OMX_DirOutput) {
         (*mH264Dec_ReleaseRefBuffers)(mHandle);
     }
 }
-
-void SPRDAVCDecoder::updatePortDefinitions() {
-    OMX_PARAM_PORTDEFINITIONTYPE *outDef = &editPortInfo(kOutputPortIndex)->mDef;
-    outDef->format.video.nFrameWidth = mWidth;
-    outDef->format.video.nFrameHeight = mHeight;
-    outDef->format.video.nStride = outDef->format.video.nFrameWidth;
-    outDef->format.video.nSliceHeight = outDef->format.video.nFrameHeight;
-
-    outDef->nBufferSize =
-        (outDef->format.video.nStride * outDef->format.video.nSliceHeight * 3) / 2;
-
-    OMX_PARAM_PORTDEFINITIONTYPE *inDef = &editPortInfo(kInputPortIndex)->mDef;
-    inDef->format.video.nFrameWidth = mWidth;
-    inDef->format.video.nFrameHeight = mHeight;
-    // input port is compressed, hence it has no stride
-    inDef->format.video.nStride = 0;
-    inDef->format.video.nSliceHeight = 0;
-}
-
 
 // static
 int32_t SPRDAVCDecoder::ExtMemAllocWrapper(
@@ -1391,27 +1079,6 @@ int SPRDAVCDecoder::VSP_unbind_cb(void *pHeader) {
     }
 
     return 0;
-}
-
-OMX_ERRORTYPE SPRDAVCDecoder::getExtensionIndex(
-    const char *name, OMX_INDEXTYPE *index) {
-
-    ALOGI("getExtensionIndex, name: %s",name);
-    if(strcmp(name, SPRD_INDEX_PARAM_ENABLE_ANB) == 0) {
-        ALOGI("getExtensionIndex:%s",SPRD_INDEX_PARAM_ENABLE_ANB);
-        *index = (OMX_INDEXTYPE) OMX_IndexParamEnableAndroidBuffers;
-        return OMX_ErrorNone;
-    } else if (strcmp(name, SPRD_INDEX_PARAM_GET_ANB) == 0) {
-        ALOGI("getExtensionIndex:%s",SPRD_INDEX_PARAM_GET_ANB);
-        *index = (OMX_INDEXTYPE) OMX_IndexParamGetAndroidNativeBuffer;
-        return OMX_ErrorNone;
-    }	else if (strcmp(name, SPRD_INDEX_PARAM_USE_ANB) == 0) {
-        ALOGI("getExtensionIndex:%s",SPRD_INDEX_PARAM_USE_ANB);
-        *index = OMX_IndexParamUseAndroidNativeBuffer2;
-        return OMX_ErrorNone;
-    }
-
-    return OMX_ErrorNotImplemented;
 }
 
 bool SPRDAVCDecoder::openDecoder(const char* libName) {

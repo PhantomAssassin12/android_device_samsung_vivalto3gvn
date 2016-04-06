@@ -17,8 +17,10 @@
 #ifndef SPRD_MPEG4_DECODER_H_
 #define SPRD_MPEG4_DECODER_H_
 
-#include "SprdSimpleOMXComponent.h"
 #include <binder/MemoryHeapIon.SPRD.h>
+
+#include <SprdVideoDecoderOMXComponent.h>
+
 #include "m4v_h263_dec_api.h"
 
 #define SPRD_ION_DEV "/dev/ion"
@@ -30,7 +32,7 @@ struct tagMP4Handle;
 
 namespace android {
 
-struct SPRDMPEG4Decoder : public SprdSimpleOMXComponent {
+struct SPRDMPEG4Decoder : public SprdVideoDecoderOMXComponent {
     SPRDMPEG4Decoder(const char *name,
                      const OMX_CALLBACKTYPE *callbacks,
                      OMX_PTR appData,
@@ -38,9 +40,6 @@ struct SPRDMPEG4Decoder : public SprdSimpleOMXComponent {
 
 protected:
     virtual ~SPRDMPEG4Decoder();
-
-    virtual OMX_ERRORTYPE internalGetParameter(
-        OMX_INDEXTYPE index, OMX_PTR params);
 
     virtual OMX_ERRORTYPE internalSetParameter(
         OMX_INDEXTYPE index, const OMX_PTR params);
@@ -63,27 +62,16 @@ protected:
         OMX_U32 portIndex,
         OMX_BUFFERHEADERTYPE *header);
 
-    virtual OMX_ERRORTYPE getConfig(OMX_INDEXTYPE index, OMX_PTR params);
-
     virtual void onQueueFilled(OMX_U32 portIndex);
     virtual void onPortFlushCompleted(OMX_U32 portIndex);
-    virtual void onPortEnableCompleted(OMX_U32 portIndex, bool enabled);
     virtual void onPortFlushPrepare(OMX_U32 portIndex);
 
-    virtual OMX_ERRORTYPE getExtensionIndex(
-        const char *name, OMX_INDEXTYPE *index);
 
 private:
     enum {
         kNumInputBuffers  = 8,
         kNumOutputBuffers = 5,
     };
-
-    enum {
-        MODE_MPEG4,
-        MODE_H263,
-
-    } mMode;
 
     enum EOSStatus {
         INPUT_DATA_AVAILABLE,
@@ -95,10 +83,7 @@ private:
 
     size_t mInputBufferCount;
 
-    int32_t mWidth, mHeight;
-    int32_t mCropLeft, mCropTop, mCropRight, mCropBottom;
-
-    int32 mMaxWidth, mMaxHeight;
+    int32_t mMaxWidth, mMaxHeight;
     int mSetFreqCount;
 
     bool mSignalledError;
@@ -107,7 +92,6 @@ private:
 
     int32_t mNumSamplesOutput;
 
-    bool mIOMMUEnabled;
     uint8_t *mCodecInterBuffer;
     uint8_t *mCodecExtraBuffer;
 
@@ -120,8 +104,6 @@ private:
     unsigned char*  mPbuf_extra_v;
     int32  mPbuf_extra_p;
     int32  mPbuf_extra_size;
-
-    OMX_BOOL iUseAndroidNativeBuffer[2];
 
     void* mLibHandle;
     bool mDecoderSwFlag;
@@ -151,21 +133,12 @@ private:
     int VSP_bind_cb(void *pHeader,int flag);
     int VSP_unbind_cb(void *pHeader,int flag);
 
-    enum {
-        NONE,
-        AWAITING_DISABLED,
-        AWAITING_ENABLED
-    } mOutputPortSettingsChange;
-
-    void initPorts();
     status_t initDecoder();
     void releaseDecoder();
     bool drainAllOutputBuffers();
     bool portSettingsChanged();
-    void updatePortDefinitions();
     bool openDecoder(const char* libName);
-    void set_ddr_freq(const char* freq_in_khz);
-    void change_ddr_freq();
+    void changeDdrFreq();
 
     DISALLOW_EVIL_CONSTRUCTORS(SPRDMPEG4Decoder);
 };
@@ -173,5 +146,3 @@ private:
 }  // namespace android
 
 #endif  // SPRD_MPEG4_DECODER_H_
-
-

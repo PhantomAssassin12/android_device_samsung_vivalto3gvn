@@ -17,9 +17,9 @@
 #ifndef SPRD_VPX_DECODER_H_
 #define SPRD_VPX_DECODER_H_
 
-#include "SprdSimpleOMXComponent.h"
 #include <binder/MemoryHeapIon.SPRD.h>
 
+#include <SprdVideoDecoderOMXComponent.h>
 #include "vpx_dec_api.h"
 
 #define SPRD_ION_DEV "/dev/ion"
@@ -29,7 +29,7 @@
 
 namespace android {
 
-struct SPRDVPXDecoder : public SprdSimpleOMXComponent {
+struct SPRDVPXDecoder : public SprdVideoDecoderOMXComponent {
     SPRDVPXDecoder(const char *name,
                    const OMX_CALLBACKTYPE *callbacks,
                    OMX_PTR appData,
@@ -38,8 +38,10 @@ struct SPRDVPXDecoder : public SprdSimpleOMXComponent {
 protected:
     virtual ~SPRDVPXDecoder();
 
+#if 0
     virtual OMX_ERRORTYPE internalGetParameter(
         OMX_INDEXTYPE index, OMX_PTR params);
+#endif
 
     virtual OMX_ERRORTYPE internalSetParameter(
         OMX_INDEXTYPE index, const OMX_PTR params);
@@ -65,9 +67,13 @@ protected:
     virtual void onQueueFilled(OMX_U32 portIndex);
     virtual void onPortFlushCompleted(OMX_U32 portIndex);
     virtual void onPortFlushPrepare(OMX_U32 portIndex);
+#if 0
     virtual void onPortEnableCompleted(OMX_U32 portIndex, bool enabled);
+#endif
+#if 0
     virtual OMX_ERRORTYPE getExtensionIndex(
         const char *name, OMX_INDEXTYPE *index);
+#endif
 
 private:
     enum {
@@ -84,15 +90,19 @@ private:
 
     size_t mInputBufferCount;
 
+#if 0
     int32_t mWidth;
     int32_t mHeight;
+#endif
 
     int32 mMaxWidth, mMaxHeight;
     int mSetFreqCount;
 
     bool mSignalledError;
 
+#if 0
     bool mIOMMUEnabled;
+#endif
     uint8_t *mPbuf_inter;
 
     sp<MemoryHeapIon> mPmem_stream;
@@ -105,7 +115,9 @@ private:
     int32  mPbuf_extra_p;
     int32  mPbuf_extra_size;
 
+#if 0
     OMX_BOOL iUseAndroidNativeBuffer[2];
+#endif
 
     EOSStatus mEOSStatus;
     void* mLibHandle;
@@ -124,19 +136,24 @@ private:
     int VSP_bind_cb(void *pHeader,int flag);
     int VSP_unbind_cb(void *pHeader,int flag);
 
+#if 0
     enum {
         NONE,
         AWAITING_DISABLED,
         AWAITING_ENABLED
     } mOutputPortSettingsChange;
+#endif
 
+#if 0
     void initPorts();
+#endif
     status_t initDecoder();
     bool drainAllOutputBuffers();
+#if 0
     void updatePortDefinitions();
+#endif
     bool openDecoder(const char* libName);
-    void set_ddr_freq(const char* freq_in_khz);
-    void change_ddr_freq();
+    void changeDdrFreq();
 
     DISALLOW_EVIL_CONSTRUCTORS(SPRDVPXDecoder);
 };
